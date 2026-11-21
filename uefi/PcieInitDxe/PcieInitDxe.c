@@ -180,6 +180,13 @@ STATIC VOID PcieInit (VOID)
   Tlmm (79, 0x1 | (0 << 2) | (0 << 6) | BIT9, 0);  /* gpio, pull-down, 2 mA, output low */
   Tlmm (80, 0x3 | (1 << 2), -1);                    /* pci_e0, pull-up */
   Tlmm (81, 0x3, -1);                               /* gpio input, pull-up */
+
+  /* Power up QCA6390 PMU and radio: BT_EN (gpio21) and WLAN_EN (gpio20) */
+  Tlmm (21, 0x3 | (0 << 2) | (7 << 6) | BIT9, 1);  /* BT_EN: gpio, pull-up, 16 mA, output high */
+  gBS->Stall (20000);                               /* 20 ms */
+  Tlmm (20, 0x3 | (0 << 2) | (7 << 6) | BIT9, 1);  /* WLAN_EN: gpio, pull-up, 16 mA, output high */
+  gBS->Stall (20000);                               /* 20 ms */
+  DEBUG ((EFI_D_ERROR, "PcieInit: QCA6390 power-on (gpio20/21 high)\n"));
   mSt.Step = 1;
   STOP_IF (1);
 
@@ -306,11 +313,11 @@ STATIC VOID PcieInit (VOID)
   STOP_IF (5);
 
   /* 6. release PERST# (>=100 ms after power), start link training, wait for DL_Active */
-  gBS->Stall (100000);
-  Tlmm (79, 0x1 | BIT9, 1);
-  gBS->Stall (1000);
+  gBS->Stall (100000);                                                    /* 100 ms T_PVPERL */
+  Tlmm (79, 0x3 | (0 << 2) | (0 << 6) | BIT9, 1);                        /* PERST# high (pull-up, 2 mA) */
+  gBS->Stall (50000);                                                     /* 50 ms endpoint boot delay */
   MmioOr32 ((UINTN)(PARF_BASE + PARF_LTSSM), BIT8);
-  for (T = 0; T < 100; T++) {                                            /* up to ~1 s */
+  for (T = 0; T < 200; T++) {                                             /* up to ~2 s */
     if (Cap && (MmioRead16 ((UINTN)(DBI_BASE + Cap + 0x12)) & BIT13)) {
       break;
     }
@@ -334,8 +341,8 @@ STATIC VOID PcieInit (VOID)
   gBS->Stall (100000);
   mSt.Bus1Id = MmioRead32 ((UINTN)CFG_BASE);
   mSt.Step = 7;
-  DEBUG ((EFI_D_WARN, "PcieInit: link up, bus1 id %08x\n", mSt.Bus1Id));
-  gBS->Stall (3000000);
+  DEBUG ((EFI_D_ERROR, "PcieInit: link UP! bus1 id %08x\n", mSt.Bus1Id));
+  gBS->Stall (5000000);
 }
 
 
