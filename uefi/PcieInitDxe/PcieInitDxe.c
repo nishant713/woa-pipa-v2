@@ -50,6 +50,11 @@ typedef struct { UINT16 Off; UINT8 Val; } PHY_REG;
 #define PARF_LTSSM                     0x1B0
 #define PARF_DBI_BASE_ADDR_V2          0x350
 #define PARF_DBI_BASE_ADDR_V2_HI       0x354
+#define PARF_SLV_ADDR_SPACE_SIZE_V2    0x358
+#define PARF_SLV_ADDR_SPACE_SIZE_V2_HI 0x35C
+#define SLV_ADDR_SPACE_SZ              0x80000000ULL
+#define PARF_ECAM_BASE                 0x380
+#define PARF_ECAM_BASE_HI              0x384
 #define PARF_ATU_BASE_ADDR             0x634
 #define PARF_ATU_BASE_ADDR_HI          0x638
 #define PARF_DEVICE_TYPE               0x1000
@@ -244,6 +249,10 @@ STATIC VOID PcieInit (VOID)
   MmioWrite32 ((UINTN)(PARF_BASE + PARF_DBI_BASE_ADDR_V2_HI), 0);
   MmioWrite32 ((UINTN)(PARF_BASE + PARF_ATU_BASE_ADDR),       (UINT32)ATU_BASE);
   MmioWrite32 ((UINTN)(PARF_BASE + PARF_ATU_BASE_ADDR_HI),    0);
+  MmioWrite32 ((UINTN)(PARF_BASE + PARF_SLV_ADDR_SPACE_SIZE_V2), 0);
+  MmioWrite32 ((UINTN)(PARF_BASE + PARF_SLV_ADDR_SPACE_SIZE_V2_HI), (UINT32)SLV_ADDR_SPACE_SZ);
+  MmioWrite32 ((UINTN)(PARF_BASE + PARF_ECAM_BASE),           (UINT32)DBI_BASE);
+  MmioWrite32 ((UINTN)(PARF_BASE + PARF_ECAM_BASE_HI),        0);
   MmioAnd32 ((UINTN)(PARF_BASE + PARF_SYS_CTRL), ~BIT29);                /* MAC_PHY_POWERDOWN_IN_P2_D_MUX_EN */
   MmioOr32 ((UINTN)(PARF_BASE + PARF_MHI_CLOCK_RESET_CTRL), BIT4);       /* BYPASS */
   MmioAnd32 ((UINTN)(PARF_BASE + PARF_PM_CTRL), ~BIT5);                  /* allow L1 */
@@ -275,6 +284,7 @@ STATIC VOID PcieInit (VOID)
   STOP_IF (4);
 
   /* 5. DWC root complex setup (dw_pcie_setup_rc subset) */
+  DEBUG ((EFI_D_ERROR, "PcieInit: DBI_BASE read pre: %08x\n", MmioRead32 ((UINTN)DBI_BASE)));
   MmioOr32 ((UINTN)(DBI_BASE + DBI_MISC_CONTROL_1), BIT0);               /* DBI RO write enable */
   MmioWrite32 ((UINTN)(DBI_BASE + 0x10), 0x00000004);                    /* BAR0: 64-bit mem, unused */
   MmioWrite32 ((UINTN)(DBI_BASE + 0x14), 0);
@@ -282,6 +292,7 @@ STATIC VOID PcieInit (VOID)
   MmioWrite16 ((UINTN)(DBI_BASE + 0x0A), 0x0604);                        /* class: PCI-PCI bridge */
   MmioOr32 ((UINTN)(DBI_BASE + 0x04), BIT0 | BIT1 | BIT2 | BIT8);        /* IO, MEM, bus master, SERR */
   Cap = FindPcieCap ();
+  DEBUG ((EFI_D_ERROR, "PcieInit: Cap %x DBI 0: %08x\n", Cap, MmioRead32 ((UINTN)DBI_BASE)));
   if (Cap) {                                                             /* qcom_pcie_clear_hpc / aspm L0s */
     MmioAnd32 ((UINTN)(DBI_BASE + Cap + 0x14), ~BIT6);                   /* SLTCAP.HPC */
     MmioAnd32 ((UINTN)(DBI_BASE + Cap + 0x0C), ~BIT10);                  /* LNKCAP ASPM L0s */
@@ -307,8 +318,13 @@ STATIC VOID PcieInit (VOID)
   }
   mSt.Ltssm = MmioRead32 ((UINTN)(DBI_BASE + DBI_PL_DEBUG0));
   mSt.LinkStatus = Cap ? MmioRead32 ((UINTN)(DBI_BASE + Cap + 0x10)) : 0;
+  {
+    UINT32 ParfLt = MmioRead32 ((UINTN)(PARF_BASE + PARF_LTSSM));
+    DEBUG ((EFI_D_ERROR, "PcieInit: PARF_LTSSM %08x (state %02x)\n", ParfLt, ParfLt & 0x3F));
+  }
   if (!(mSt.LinkStatus & (BIT13 << 16))) {
     DEBUG ((EFI_D_ERROR, "PcieInit: link down (ltssm %x lnk %x)\n", mSt.Ltssm, mSt.LinkStatus));
+    gBS->Stall (3000000);
     return;
   }
   mSt.Step = 6;
@@ -319,6 +335,7 @@ STATIC VOID PcieInit (VOID)
   mSt.Bus1Id = MmioRead32 ((UINTN)CFG_BASE);
   mSt.Step = 7;
   DEBUG ((EFI_D_WARN, "PcieInit: link up, bus1 id %08x\n", mSt.Bus1Id));
+  gBS->Stall (3000000);
 }
 
 
