@@ -10,3 +10,15 @@ kona_bsp/
 firmware/
 config_snapshot_*/
 hive_backup_*/
+claude/
+qpep/out8250/
+qpep/*.cer
+qpep/*.pfx
+qpep/woa-pipa*
+HANDOVER_TO_GEMINI.md
+handover_to_gemini.md
+wlan_drv/
+bt_fw/
+touch_fw/
+logs/
+*.log
