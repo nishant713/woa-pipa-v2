@@ -116,6 +116,64 @@ static PUCHAR MapPhys(ULONGLONG pa, SIZE_T len)
     return (PUCHAR)MmMapIoSpaceEx(a, len, PAGE_READWRITE | PAGE_NOCACHE);
 }
 
+/* ---------------- apps SMMU: map PCIe0 stream IDs (QCA6390 Wi-Fi DMA) ----------------
+ * pipa UEFI leaves no SMR for PCIe0 (SID 0x1c00 root port, 0x1c01 bus1 dev0) and sCR0.USFCFG=1,
+ * so card DMA faults and the card then stalls the CPU on the next MMIO read.
+ * Same sequence as U-Boot drivers/iommu/qcom-hyp-smmu.c (EL1 under QHEE): take a free context bank,
+ * CBAR = S1_TRANS_S2_BYPASS VMID 0, SCTLR without M (no translation), then SMR = SID|VALID and
+ * S2CR = TRANS->cb. Never S2CR BYPASS (hypervisor). Only plain 32-bit stores (QHEE emulates them). */
+#define SMMU_BASE   0x15000000ull
+#define SMMU_SIZE   0x100000
+static ULONG SR(PUCHAR b, ULONG o) { return READ_REGISTER_ULONG((volatile ULONG *)(b + o)); }
+static VOID  SW(PUCHAR b, ULONG o, ULONG v) { WRITE_REGISTER_ULONG((volatile ULONG *)(b + o), v); }
+static VOID SmmuMapPcie(VOID)
+{
+    static const ULONG sids[] = { 0x1c01, 0x1c00 };
+    PUCHAR b = MapPhys(SMMU_BASE, SMMU_SIZE);
+    ULONG idr0, idr1, nsmr, ncb, pg, cbOff, i, k, cb = 0xFFFFFFFF;
+    if (!b) { LOG("smmu: map failed"); return; }
+    idr0 = SR(b, 0x20); idr1 = SR(b, 0x24);
+    nsmr = idr0 & 0xFF; ncb = idr1 & 0xFF; pg = (idr1 & 0x80000000u) ? 0x10000 : 0x1000;
+    cbOff = pg * (1u << (((idr1 >> 28) & 7) + 1));
+    LOG("smmu: scr0=%08X idr0=%08X idr1=%08X nsmr=%u ncb=%u cb@+%X", SR(b, 0), idr0, idr1, nsmr, ncb, cbOff);
+    if (cbOff + ncb * pg > SMMU_SIZE || nsmr > 128) { LOG("smmu: unexpected layout, skip"); goto out; }
+    /* already mapped? reuse its context bank */
+    for (i = 0; i < nsmr; i++) {
+        ULONG smr = SR(b, 0x800 + 4 * i);
+        if ((smr & 0x80000000u) && (smr & 0x7FFF) == sids[0]) { LOG("smmu: sid %X already in smr%u s2cr=%08X", sids[0], i, SR(b, 0xC00 + 4 * i)); goto out; }
+    }
+    /* free context bank: CBAR == 0 (S2_TRANS, VMID 0, never configured) and not referenced by any S2CR */
+    for (i = 0; i < ncb && cb == 0xFFFFFFFF; i++) {
+        BOOLEAN used = FALSE;
+        if (SR(b, pg + 4 * i) != 0) continue;
+        for (k = 0; k < nsmr; k++)
+            if ((SR(b, 0x800 + 4 * k) & 0x80000000u) && ((SR(b, 0xC00 + 4 * k) >> 16) & 3) == 0 && (SR(b, 0xC00 + 4 * k) & 0xFF) == i) used = TRUE;
+        if (!used) cb = i;
+    }
+    if (cb == 0xFFFFFFFF) { LOG("smmu: no free context bank"); goto out; }
+    {
+        PUCHAR c = b + cbOff + cb * pg;
+        LOG("smmu: using cb%u (cbar=%08X sctlr=%08X)", cb, SR(b, pg + 4 * cb), SR(c, 0));
+        SW(b, pg + 4 * cb, 0x0001F000);            /* CBAR: S1_TRANS_S2_BYPASS, VMID 0 (same as CB0-5) */
+        SW(b, pg + 0x800 + 4 * cb, 1);             /* CBA2R: VA64 */
+        SW(c, 0x20, 0); SW(c, 0x24, 0); SW(c, 0x28, 0); SW(c, 0x2C, 0);   /* TTBR0/1 */
+        SW(c, 0x30, 0); SW(c, 0x38, 0); SW(c, 0x3C, 0);                    /* TCR, MAIR0/1 */
+        SW(c, 0x00, 0xE0);                         /* SCTLR: CFRE|CFIE|CFCFG, M=0 */
+        KeMemoryBarrier();
+        LOG("smmu: cb%u cbar=%08X cba2r=%08X sctlr=%08X", cb, SR(b, pg + 4 * cb), SR(b, pg + 0x800 + 4 * cb), SR(c, 0));
+    }
+    for (k = 0; k < sizeof(sids) / sizeof(sids[0]); k++) {
+        for (i = 0; i < nsmr; i++) if (!(SR(b, 0x800 + 4 * i) & 0x80000000u)) break;
+        if (i == nsmr) { LOG("smmu: no free smr"); break; }
+        SW(b, 0x800 + 4 * i, 0x80000000u | sids[k]);   /* SMR: valid, mask 0 */
+        SW(b, 0xC00 + 4 * i, cb);                      /* S2CR: TRANS -> cb */
+        KeMemoryBarrier();
+        LOG("smmu: sid %X -> smr%u=%08X s2cr=%08X", sids[k], i, SR(b, 0x800 + 4 * i), SR(b, 0xC00 + 4 * i));
+    }
+out:
+    MmUnmapIoSpace(b, SMMU_SIZE);
+}
+
 static VOID MsSleep(ULONG ms) { LARGE_INTEGER t; t.QuadPart = -10000LL * ms; KeDelayExecutionThread(KernelMode, FALSE, &t); }
 
 static VOID UartSetup(PUCHAR se, ULONG div)
@@ -903,6 +961,7 @@ NTSTATUS PwrD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
         return STATUS_SUCCESS;
     }
     c->started = TRUE;
+    SmmuMapPcie();
     {   /* uart6's interrupt gets connected right after this callback: clock SE6 and mask it first */
         PUCHAR g = MapPhys(GCC_VOTE_PAGE, 0x1000), se;
         if (g) { WRITE_REGISTER_ULONG((volatile ULONG *)(g + 0x8), READ_REGISTER_ULONG((volatile ULONG *)(g + 0x8)) | (1u << 16)); MmUnmapIoSpace(g, 0x1000); }
