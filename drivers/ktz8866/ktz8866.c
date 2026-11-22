@@ -6,6 +6,7 @@
  * chip registers (DbgPrint + device registry key "Ktz*"). It does NOT re-initialise the chip:
  * the bootloader/UEFI already enabled it. Brightness is written only if the device key has a
  * DWORD "Brightness" (0..2047); change it and restart the device to apply.
+ * The backlight follows the console display state (power button / screen timeout): off with the panel.
  * Register map: Linux drivers/video/backlight/ktz8866.c.
  */
 #include <ntddk.h>
@@ -31,6 +32,9 @@ typedef struct _DEV_CTX {
     LARGE_INTEGER conn;
     BOOLEAN haveConn;
     WDFIOTARGET spb;
+    PVOID dispReg;          /* GUID_CONSOLE_DISPLAY_STATE registration */
+    UCHAR savedEn, savedLsb, savedMsb;
+    BOOLEAN blanked;
 } DEV_CTX, *PDEV_CTX;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEV_CTX, GetCtx)
 
@@ -39,6 +43,37 @@ EVT_WDF_DRIVER_DEVICE_ADD KtzDeviceAdd;
 EVT_WDF_DEVICE_PREPARE_HARDWARE KtzPrepare;
 EVT_WDF_DEVICE_RELEASE_HARDWARE KtzRelease;
 EVT_WDF_DEVICE_D0_ENTRY KtzD0Entry;
+
+/* GUID_CONSOLE_DISPLAY_STATE (defined locally so no extra GUID library is needed) */
+static const GUID KtzGuidDisplayState = { 0x6fe69556, 0x704a, 0x47a0, { 0x8f, 0x24, 0xc2, 0x8d, 0x93, 0x6f, 0xda, 0x47 } };
+static NTSTATUS KtzWrite(PDEV_CTX c, UCHAR reg, UCHAR val);
+static NTSTATUS KtzRead(PDEV_CTX c, UCHAR reg, UCHAR *val);
+
+/* Console display on/off (power button, screen timeout): turn the backlight off with the panel.
+ * Value: 0 = off, 1 = on, 2 = dimmed. Called at PASSIVE_LEVEL, also once right after registering. */
+POWER_SETTING_CALLBACK KtzDisplayState;
+NTSTATUS KtzDisplayState(LPCGUID g, PVOID val, ULONG len, PVOID ctx)
+{
+    PDEV_CTX c = (PDEV_CTX)ctx; ULONG on; NTSTATUS st = STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(g);
+    if (len < sizeof(ULONG) || !c->spb) return STATUS_SUCCESS;
+    on = *(PULONG)val;
+    if (on == 0 && !c->blanked) {
+        if (NT_SUCCESS(KtzRead(c, KTZ_BL_EN, &c->savedEn)) && NT_SUCCESS(KtzRead(c, KTZ_BRT_LSB, &c->savedLsb)) &&
+            NT_SUCCESS(KtzRead(c, KTZ_BRT_MSB, &c->savedMsb))) {
+            KtzWrite(c, KTZ_BRT_LSB, 0); KtzWrite(c, KTZ_BRT_MSB, 0);
+            st = KtzWrite(c, KTZ_BL_EN, (UCHAR)(c->savedEn & ~0x40));   /* bit6 = BL_EN */
+            c->blanked = TRUE;
+        }
+        LOG("display off -> backlight off (bl_en was 0x%02X) st=0x%08X", c->savedEn, st);
+    } else if (on != 0 && c->blanked) {
+        st = KtzWrite(c, KTZ_BL_EN, c->savedEn);
+        KtzWrite(c, KTZ_BRT_LSB, c->savedLsb); KtzWrite(c, KTZ_BRT_MSB, c->savedMsb);
+        c->blanked = FALSE;
+        LOG("display on -> backlight restored st=0x%08X", st);
+    }
+    return STATUS_SUCCESS;
+}
 
 typedef struct { SPB_TRANSFER_LIST list; SPB_TRANSFER_LIST_ENTRY second; } SEQ2;
 
@@ -115,12 +150,18 @@ NTSTATUS KtzPrepare(WDFDEVICE dev, WDFCMRESLIST raw, WDFCMRESLIST xl)
     WDF_IO_TARGET_OPEN_PARAMS_INIT_OPEN_BY_NAME(&op, &path, GENERIC_READ | GENERIC_WRITE);
     st = WdfIoTargetOpen(c->spb, &op);
     LOG("open SPB target st=0x%08X", st);
+    if (NT_SUCCESS(st) && !c->dispReg) {
+        NTSTATUS rs = PoRegisterPowerSettingCallback(WdfDeviceWdmGetDeviceObject(dev), &KtzGuidDisplayState,
+                                                     KtzDisplayState, c, &c->dispReg);
+        LOG("display-state callback st=0x%08X", rs);
+    }
     return st;
 }
 
 NTSTATUS KtzRelease(WDFDEVICE dev, WDFCMRESLIST xl)
 {
     PDEV_CTX c = GetCtx(dev); UNREFERENCED_PARAMETER(xl);
+    if (c->dispReg) { PoUnregisterPowerSettingCallback(c->dispReg); c->dispReg = NULL; }
     if (c->spb) { WdfIoTargetClose(c->spb); WdfObjectDelete(c->spb); c->spb = NULL; }
     return STATUS_SUCCESS;
 }
