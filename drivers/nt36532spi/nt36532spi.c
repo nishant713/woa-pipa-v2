@@ -95,6 +95,7 @@ typedef struct _DEV_CTX {
     USHORT scan;
     BOOLEAN sentUp;
     UCHAR lastCid[10];
+    ULONG hbPolls, hbReads, hbFail, hbReports, hbDropped, hbTouch;
 } DEV_CTX, *PDEV_CTX;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEV_CTX, GetCtx)
 
@@ -501,7 +502,8 @@ static VOID SendReport(PDEV_CTX c, const TOUCH_REPORT *rep)
     WDFREQUEST r;
     if (!c->readQ) return;
     NTSTATUS st;
-    if (!NT_SUCCESS(WdfIoQueueRetrieveNextRequest(c->readQ, &r))) return;   /* nobody reading: drop */
+    if (!NT_SUCCESS(WdfIoQueueRetrieveNextRequest(c->readQ, &r))) { c->hbDropped++; return; }   /* nobody reading: drop */
+    c->hbReports++;
     st = CopyOut(r, rep, sizeof(*rep));
     if (!NT_SUCCESS(st)) LOG("report delivery failed %08X", st);
     WdfRequestComplete(r, st);
@@ -516,8 +518,23 @@ VOID NtPoll(WDFTIMER t)
     static ULONG rdfail;
     NTSTATUS rs;
     if (!c->fwOk || !c->se) { LOG("poll: stopped (fwOk=%d se=%p)", c->fwOk, c->se); return; }
+    c->hbPolls++;
     rs = NvtRead(c, EVENT_BUF_ADDR, d, POINT_DATA_LEN + PEN_DATA_LEN);
-    if (!NT_SUCCESS(rs)) { if (++rdfail <= 5) LOG("poll: read failed %08X", rs); goto rearm; }
+    if (!NT_SUCCESS(rs)) { c->hbFail++; if (++rdfail <= 5) LOG("poll: read failed %08X", rs); goto rearm; }
+    c->hbReads++;
+    {   /* heartbeat every ~10 s: shows whether polling, the SPI reads, the controller and the HID reader are alive */
+        static LARGE_INTEGER last; LARGE_INTEGER now; KeQuerySystemTimePrecise(&now);
+        if (now.QuadPart - last.QuadPart > 100000000LL) {
+            ULONG k, same77 = 1, sameFF = 1, zero = 1;
+            for (k = 1; k < 8; k++) { if (d[k] != 0x77) same77 = 0; if (d[k] != 0xFF) sameFF = 0; if (d[k]) zero = 0; }
+            LOG("hb: polls=%lu reads=%lu fail=%lu touches=%lu reports=%lu dropped(no HID read)=%lu raw=%02X %02X %02X %02X %02X %02X %02X %02X%s%s%s",
+                c->hbPolls, c->hbReads, c->hbFail, c->hbTouch, c->hbReports, c->hbDropped,
+                d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
+                same77 ? " [ESD/reset pattern 0x77]" : "", sameFF ? " [all FF: controller gone?]" : "", zero ? " [zeros]" : "");
+            last = now;
+            c->hbPolls = c->hbReads = c->hbFail = c->hbTouch = c->hbReports = c->hbDropped = 0;
+        }
+    }
     RtlZeroMemory(&rep, sizeof(rep));
     rep.rid = RID_TOUCH;
     for (i = 0; i < 10; i++) {
@@ -541,10 +558,12 @@ VOID NtPoll(WDFTIMER t)
         rep.count = (UCHAR)(n ? n : c->lastFingers);
         SendReport(c, &rep);
     }
+    if (n) c->hbTouch++;
     for (i = 0; i < n; i++) c->lastCid[i] = rep.c[i].cid;
     c->lastFingers = n;
 rearm:
     if (c->polling) WdfTimerStart(t, WDF_REL_TIMEOUT_IN_MS(n ? 10 : 20));
+    else LOG("poll: polling flag cleared - timer not re-armed");
 }
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
@@ -662,6 +681,6 @@ NTSTATUS NtD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
     c->lastFingers = 0; c->logBudget = 0;
     c->polling = TRUE;
     if (c->poll) WdfTimerStart(c->poll, WDF_REL_TIMEOUT_IN_MS(200));
-    LOG("polling started - touch the screen");
+    LOG("polling started - touch the screen (hb build)");
     return STATUS_SUCCESS;
 }
