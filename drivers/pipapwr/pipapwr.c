@@ -174,6 +174,61 @@ out:
     MmUnmapIoSpace(b, SMMU_SIZE);
 }
 
+/* ---------------- SPMI (PMIC arbiter v5) read-only probe ----------------
+ * Battery gauge (PM8150B FG gen4, SID 2 @0x4000), charger (@0x1000) and Type-C/VBUS live behind SPMI.
+ * Same sequence as Linux drivers/spmi/spmi-pmic-arb.c v5: find APID for PPID (sid<<8 | addr>>8) in
+ * core+0x900+4*apid, then use the EE0 observer channel obsrvr + 0x80*apid: CMD = (READ=15)<<27 |
+ * (addr&0xff)<<4 | (len-1); poll STATUS bit0; data in RDATA0. Observer reads only, no writes. */
+#define SPMI_CORE   0x0c440000ull
+#define SPMI_CORE_SZ 0x1100
+#define SPMI_OBS    0x0e600000ull
+#define SPMI_OBS_SZ 0x10000
+static PUCHAR g_spmiCore, g_spmiObs;
+static LONG SpmiApid(USHORT ppid)
+{
+    ULONG n, v, found = 0xFFFF;
+    for (n = 0; 0x900 + 4 * n < SPMI_CORE_SZ; n++) {
+        v = SR(g_spmiCore, 0x900 + 4 * n);
+        if (v && ((v >> 8) & 0xFFF) == ppid) { found = n; break; }   /* first mapping: observer reads are per-EE, any APID works */
+    }
+    return found == 0xFFFF ? -1 : (LONG)found;
+}
+static NTSTATUS SpmiRead(UCHAR sid, USHORT addr, UCHAR *buf, ULONG len)
+{
+    LONG apid = SpmiApid((USHORT)((sid << 8) | (addr >> 8)));
+    ULONG off, st = 0, i, d, t;
+    if (apid < 0 || len < 1 || len > 4) return STATUS_NOT_FOUND;
+    off = 0x80 * (ULONG)apid;
+    SW(g_spmiObs, off + 0x00, (15u << 27) | ((addr & 0xFFu) << 4) | (len - 1));
+    for (t = 0; t < 1000; t++) { st = SR(g_spmiObs, off + 0x08); if (st) break; KeStallExecutionProcessor(1); }
+    if (!(st & 1) || (st & 0xE)) return STATUS_IO_DEVICE_ERROR;
+    d = SR(g_spmiObs, off + 0x18);
+    for (i = 0; i < len; i++) buf[i] = (UCHAR)(d >> (8 * i));
+    return STATUS_SUCCESS;
+}
+static VOID SpmiProbe(VOID)
+{
+    static const struct { UCHAR sid; USHORT addr; UCHAR len; PCSTR name; } r[] = {
+        { 2, 0x4009, 2, "fg msoc" }, { 2, 0x41A0, 2, "fg vbat" }, { 2, 0x41A2, 2, "fg ibat" },
+        { 2, 0x4288, 2, "fg temp" }, { 2, 0x1006, 1, "chg status1" }, { 2, 0x110B, 1, "chg powerpath" },
+        { 2, 0x1104, 1, "dcdc/otg sts" }, { 2, 0x1506, 1, "typec misc" }, { 0, 0x0104, 1, "pm8150 rev" },
+    };
+    UCHAR b[4]; ULONG i; NTSTATUS st;
+    if (!g_spmiCore) g_spmiCore = MapPhys(SPMI_CORE, SPMI_CORE_SZ);
+    if (!g_spmiObs)  g_spmiObs  = MapPhys(SPMI_OBS, SPMI_OBS_SZ);
+    if (!g_spmiCore || !g_spmiObs) { LOG("spmi: map failed"); return; }
+    LOG("spmi: arb version %08X", SR(g_spmiCore, 0));
+    for (i = 0; i < RTL_NUMBER_OF(r); i++) {
+        RtlZeroMemory(b, sizeof(b));
+        st = SpmiRead(r[i].sid, r[i].addr, b, r[i].len);
+        LOG("spmi: %-14s sid%u %04X apid %ld st %lX = %02X %02X", r[i].name, r[i].sid, r[i].addr,
+            SpmiApid((USHORT)((r[i].sid << 8) | (r[i].addr >> 8))), st, b[0], b[1]);
+    }
+    if (SpmiRead(2, 0x4009, b, 2) == 0) LOG("spmi: battery ~%u%%", (ULONG)(((b[0] < b[1] ? b[0] : b[1]) - 1) * 98 / 253 + 1));
+    if (SpmiRead(2, 0x41A0, b, 2) == 0) LOG("spmi: vbat %u mV", (ULONG)(((ULONGLONG)(b[1] << 8 | b[0]) * 122070) / 1000000));
+    if (SpmiRead(2, 0x41A2, b, 2) == 0) LOG("spmi: ibat %ld mA (neg = charging)", (LONG)(((LONGLONG)(SHORT)(b[1] << 8 | b[0]) * 488281) / 1000000));
+}
+
 static VOID MsSleep(ULONG ms) { LARGE_INTEGER t; t.QuadPart = -10000LL * ms; KeDelayExecutionThread(KernelMode, FALSE, &t); }
 
 static VOID UartSetup(PUCHAR se, ULONG div)
@@ -962,6 +1017,7 @@ NTSTATUS PwrD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
     }
     c->started = TRUE;
     SmmuMapPcie();
+    SpmiProbe();
     {   /* uart6's interrupt gets connected right after this callback: clock SE6 and mask it first */
         PUCHAR g = MapPhys(GCC_VOTE_PAGE, 0x1000), se;
         if (g) { WRITE_REGISTER_ULONG((volatile ULONG *)(g + 0x8), READ_REGISTER_ULONG((volatile ULONG *)(g + 0x8)) | (1u << 16)); MmUnmapIoSpace(g, 0x1000); }
