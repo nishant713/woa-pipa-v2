@@ -318,7 +318,7 @@ NTSTATUS BattDeviceAdd(WDFDRIVER drv, PWDFDEVICE_INIT init)
     if (!NT_SUCCESS(st)) return st;
 
     WDF_TIMER_CONFIG_INIT_PERIODIC(&tc, BattTimer, POLL_MS);
-    WDF_OBJECT_ATTRIBUTES_INIT(&a); a.ParentObject = dev; a.ExecutionLevel = WdfExecutionLevelPassive;
+    WDF_OBJECT_ATTRIBUTES_INIT(&a); a.ParentObject = dev;   /* DISPATCH: KMDF rejects periodic passive timers (C00000BB) */
     tc.AutomaticSerialization = FALSE;
     st = WdfTimerCreate(&tc, &a, &c->timer);
     LOG("device add st=%08X", st);
