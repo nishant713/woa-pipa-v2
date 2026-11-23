@@ -337,7 +337,6 @@ NTSTATUS BattDeviceAdd(WDFDRIVER drv, PWDFDEVICE_INIT init)
     WDFDEVICE dev;
     PBATT_CTX c;
     NTSTATUS st;
-    UCHAR fn = IRP_MJ_DEVICE_CONTROL;
     UNREFERENCED_PARAMETER(drv);
 
     WdfDeviceInitSetDeviceType(init, FILE_DEVICE_BATTERY);
@@ -345,7 +344,7 @@ NTSTATUS BattDeviceAdd(WDFDRIVER drv, PWDFDEVICE_INIT init)
     pnp.EvtDevicePrepareHardware = BattPrepare;
     pnp.EvtDeviceReleaseHardware = BattRelease;
     WdfDeviceInitSetPnpPowerEventCallbacks(init, &pnp);
-    st = WdfDeviceInitAssignWdmIrpPreprocessCallback(init, BattIoctlPre, IRP_MJ_DEVICE_CONTROL, &fn, 1);
+    st = WdfDeviceInitAssignWdmIrpPreprocessCallback(init, BattIoctlPre, IRP_MJ_DEVICE_CONTROL, NULL, 0);   /* no minor-function filter: IOCTL IRPs have minor 0 */
     if (!NT_SUCCESS(st)) return st;
 
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&a, BATT_CTX);
