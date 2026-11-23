@@ -30,6 +30,7 @@ typedef struct _BATT_CTX {
     WDFSPINLOCK lock;
     ULONG     tag;
     BOOLEAN   notifyArmed;
+    ULONG     ticks, ioctls;
 } BATT_CTX, *PBATT_CTX;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(BATT_CTX, BattCtx)
 
@@ -224,17 +225,34 @@ EVT_WDF_DEVICE_RELEASE_HARDWARE BattRelease;
 EVT_WDF_TIMER BattTimer;
 EVT_WDFDEVICE_WDM_IRP_PREPROCESS BattIoctlPre;
 
+static const GUID PipaGuidBattery = { 0x72631e54, 0x78a4, 0x11d0, { 0xbc, 0xf7, 0x00, 0xaa, 0x00, 0xb7, 0xb3, 0x2a } };   /* GUID_DEVICE_BATTERY */
+static VOID DumpInterfaces(PBATT_CTX c)
+{
+    PWSTR list = NULL, p; NTSTATUS st; ULONG n = 0;
+    st = IoGetDeviceInterfaces(&PipaGuidBattery, NULL, 0, &list);
+    LOG("GUID_DEVICE_BATTERY interfaces st=%08X, ioctls so far %lu", st, c->ioctls);
+    if (NT_SUCCESS(st) && list) {
+        for (p = list; *p; p += wcslen(p) + 1) { LOG("  [%lu] %ws", n, p); n++; }
+        if (!n) LOG("  (none enabled)");
+        ExFreePool(list);
+    }
+}
+
 VOID BattTimer(WDFTIMER t)
 {
     PBATT_CTX c = BattCtx(WdfTimerGetParentObject(t));
     if (c->classHandle) BatteryClassStatusNotify(c->classHandle);
+    c->ticks++;
 }
+
+
 
 NTSTATUS BattIoctlPre(WDFDEVICE dev, PIRP irp)
 {
     PBATT_CTX c = BattCtx(dev);
     NTSTATUS st;
     if (c->classHandle) {
+        c->ioctls++;
         { static ULONG n; if (n++ < 30) LOG("ioctl %08lX", IoGetCurrentIrpStackLocation(irp)->Parameters.DeviceIoControl.IoControlCode); }
         st = BatteryClassIoctl(c->classHandle, irp);
         if (st != STATUS_NOT_SUPPORTED) return st;   /* battc completed it */
@@ -276,6 +294,7 @@ NTSTATUS BattPrepare(WDFDEVICE dev, WDFCMRESLIST raw, WDFCMRESLIST xlat)
         LOG("BatteryClassInitializeDevice st=%08X", st);
         if (!NT_SUCCESS(st)) { c->classHandle = NULL; return st; }
     }
+    DumpInterfaces(c);
     WdfTimerStart(c->timer, WDF_REL_TIMEOUT_IN_MS(2000));
     return STATUS_SUCCESS;
 }
