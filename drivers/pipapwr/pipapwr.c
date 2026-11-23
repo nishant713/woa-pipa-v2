@@ -889,8 +889,6 @@ static NTSTATUS AddChild(PFDO_CTX c)
 
 /* ---------------- bring-up thread ---------------- */
 /* battery: a second static child, PIPA\PM8150B_BATT, for pipabatt.sys (reads the PM8150B fuel gauge over SPMI) */
-/* also used for COMPOSITE_BATTERY: this install has no root-enumerated composite battery (compbatt.sys),
- * and without it nothing opens our battery and the shell shows no battery icon. battery.inf binds it. */
 static NTSTATUS AddSimpleChild(PFDO_CTX c, PCWSTR hwidS, PCWSTR instS, PCWSTR textS)
 {
     PWDFDEVICE_INIT init; NTSTATUS st; WDFDEVICE child; WDF_OBJECT_ATTRIBUTES a;
@@ -1047,10 +1045,9 @@ NTSTATUS PwrD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
     SmmuMapPcie();
     SpmiProbe();
     if (!c->battAdded) {
-        NTSTATUS bst = AddSimpleChild(c, L"PIPA\\PM8150B_BATT", L"01", L"pipa Battery"), cst;
+        NTSTATUS bst = AddSimpleChild(c, L"PIPA\\PM8150B_BATT", L"01", L"pipa Battery");
         c->battAdded = NT_SUCCESS(bst);
-        cst = AddSimpleChild(c, L"COMPOSITE_BATTERY", L"02", L"Composite Battery");
-        LOG("battery child PDO st=%08X composite battery PDO st=%08X", bst, cst);
+        LOG("battery child PDO st=%08X (kdquick)", bst);
     }
     {   /* uart6's interrupt gets connected right after this callback: clock SE6 and mask it first */
         PUCHAR g = MapPhys(GCC_VOTE_PAGE, 0x1000), se;

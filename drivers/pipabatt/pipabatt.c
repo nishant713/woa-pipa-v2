@@ -107,7 +107,6 @@ static VOID Sample(PBATT_CTX c, BATT_SAMPLE *s)
 static NTSTATUS QueryTag(PVOID ctx, PULONG tag)
 {
     PBATT_CTX c = (PBATT_CTX)ctx;
-    LOG("QueryTag -> %lu", c->tag);
     if (c->tag == BATTERY_TAG_INVALID) return STATUS_NO_SUCH_DEVICE;
     *tag = c->tag;
     return STATUS_SUCCESS;
@@ -128,7 +127,6 @@ static NTSTATUS QueryInformation(PVOID ctx, ULONG tag, BATTERY_QUERY_INFORMATION
     BATT_SAMPLE s;
     UNREFERENCED_PARAMETER(atRate);
     *ret = 0;
-    LOG("QueryInformation level %d", (int)level);
     if (tag != c->tag) return STATUS_NO_SUCH_DEVICE;
     switch (level) {
     case BatteryInformation: {
@@ -180,7 +178,7 @@ static NTSTATUS QueryStatus(PVOID ctx, ULONG tag, PBATTERY_STATUS bs)
     if (tag != c->tag) return STATUS_NO_SUCH_DEVICE;
     Sample(c, &s);
     RtlZeroMemory(bs, sizeof(*bs));
-    { static ULONG n; if (n++ < 20) LOG("QueryStatus soc=%lu online=%u mA=%ld", s.socPermille, s.online, s.mA); }
+    { static ULONG n; if (n++ < 3) LOG("QueryStatus soc=%lu online=%u mA=%ld", s.socPermille, s.online, s.mA); }
     if (!s.ok) {
         bs->Capacity = BATTERY_UNKNOWN_CAPACITY; bs->Voltage = BATTERY_UNKNOWN_VOLTAGE; bs->Rate = BATTERY_UNKNOWN_RATE;
         return STATUS_SUCCESS;
@@ -272,7 +270,7 @@ NTSTATUS BattIoctlPre(WDFDEVICE dev, PIRP irp)
     NTSTATUS st;
     if (c->classHandle) {
         c->ioctls++;
-        { static ULONG n; if (n++ < 30) LOG("ioctl %08lX", IoGetCurrentIrpStackLocation(irp)->Parameters.DeviceIoControl.IoControlCode); }
+        { static ULONG n; if (n++ < 3) LOG("ioctl %08lX", IoGetCurrentIrpStackLocation(irp)->Parameters.DeviceIoControl.IoControlCode); }
         st = BatteryClassIoctl(c->classHandle, irp);
         if (st != STATUS_NOT_SUPPORTED) return st;   /* battc completed it */
     }
@@ -290,7 +288,7 @@ NTSTATUS BattPrepare(WDFDEVICE dev, WDFCMRESLIST raw, WDFCMRESLIST xlat)
     if (!c->core) c->core = MapPhys(SPMI_CORE, SPMI_CORE_SZ);
     if (!c->obs)  c->obs  = MapPhys(SPMI_OBS, SPMI_OBS_SZ);
     if (!c->core || !c->obs) { LOG("map failed"); return STATUS_INSUFFICIENT_RESOURCES; }
-    LOG("spmi arb version %08X", RR(c->core, 0));
+    LOG("spmi arb version %08X (kdquick)", RR(c->core, 0));
     Sample(c, &s);
     LOG("ok=%u soc=%lu.%lu%% %lu mV %ld mA %ld.%ld C online=%u chg=%u", s.ok, s.socPermille / 10, s.socPermille % 10,
         s.mV, s.mA, s.tempDeciC / 10, s.tempDeciC % 10, s.online, s.chgState);
