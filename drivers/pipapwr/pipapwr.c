@@ -573,7 +573,7 @@ typedef struct _FDO_CTX {
     PUCHAR se;                      /* QUP0 SE6, set once the controller is ready (ISR data path) */
     PUCHAR seMask;                  /* QUP0 SE6 mapped at D0 entry, used to mask a stray interrupt */
     WDFINTERRUPT irq;
-    BOOLEAN started, ready, childAdded;
+    BOOLEAN started, ready, childAdded, battAdded;
     UCHAR bdaddr[6];
     /* RX ring (ISR producer, DPC consumer; synchronized with the interrupt lock) */
     UCHAR ring[RING_SIZE]; ULONG rhead, rtail, rdrop;
@@ -888,6 +888,33 @@ static NTSTATUS AddChild(PFDO_CTX c)
 }
 
 /* ---------------- bring-up thread ---------------- */
+/* battery: a second static child, PIPA\PM8150B_BATT, for pipabatt.sys (reads the PM8150B fuel gauge over SPMI) */
+static NTSTATUS AddBattChild(PFDO_CTX c)
+{
+    PWDFDEVICE_INIT init; NTSTATUS st; WDFDEVICE child; WDF_OBJECT_ATTRIBUTES a;
+    DECLARE_CONST_UNICODE_STRING(hwid, L"PIPA\\PM8150B_BATT");
+    DECLARE_CONST_UNICODE_STRING(inst, L"01");
+    DECLARE_CONST_UNICODE_STRING(text, L"pipa Battery");
+    DECLARE_CONST_UNICODE_STRING(loc, L"pm8150b fg");
+    init = WdfPdoInitAllocate(c->dev);
+    if (!init) return STATUS_INSUFFICIENT_RESOURCES;
+    st = WdfPdoInitAssignDeviceID(init, &hwid);
+    if (NT_SUCCESS(st)) st = WdfPdoInitAddHardwareID(init, &hwid);
+    if (NT_SUCCESS(st)) st = WdfPdoInitAssignInstanceID(init, &inst);
+    if (NT_SUCCESS(st)) st = WdfPdoInitAddDeviceText(init, &text, &loc, 0x409);
+    if (!NT_SUCCESS(st)) { WdfDeviceInitFree(init); return st; }
+    WdfPdoInitSetDefaultLocale(init, 0x409);
+    WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&a, PDO_CTX);
+    st = WdfDeviceCreate(&init, &a, &child);
+    if (!NT_SUCCESS(st)) { WdfDeviceInitFree(init); return st; }
+    PdoCtx(child)->parent = c->dev;
+    WdfFdoLockStaticChildListForIteration(c->dev);
+    st = WdfFdoAddStaticChild(c->dev, child);
+    WdfFdoUnlockStaticChildListFromIteration(c->dev);
+    if (!NT_SUCCESS(st)) WdfObjectDelete(child);
+    return st;
+}
+
 static VOID GetBdAddr(PFDO_CTX c)
 {
     WDFKEY k; UNICODE_STRING n; ULONG lo = 0, hi = 0; BOOLEAN have = FALSE;
@@ -1018,6 +1045,7 @@ NTSTATUS PwrD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
     c->started = TRUE;
     SmmuMapPcie();
     SpmiProbe();
+    if (!c->battAdded) { NTSTATUS bst = AddBattChild(c); c->battAdded = NT_SUCCESS(bst); LOG("battery child PDO st=%08X", bst); }
     {   /* uart6's interrupt gets connected right after this callback: clock SE6 and mask it first */
         PUCHAR g = MapPhys(GCC_VOTE_PAGE, 0x1000), se;
         if (g) { WRITE_REGISTER_ULONG((volatile ULONG *)(g + 0x8), READ_REGISTER_ULONG((volatile ULONG *)(g + 0x8)) | (1u << 16)); MmUnmapIoSpace(g, 0x1000); }

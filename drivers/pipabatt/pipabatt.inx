@@ -1,0 +1,53 @@
+;
+; pipabatt.inf - Xiaomi Pad 6 (pipa) battery: PM8150B fuel gauge via SPMI (child of pipapwr)
+;
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Battery
+ClassGuid   = {72631e54-78a4-11d0-bcf7-00aa00b7b32a}
+Provider    = %Mfg%
+CatalogFile = pipabatt.cat
+DriverVer   = 11/23/2026,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %Disk%,,,""
+
+[SourceDisksFiles]
+pipabatt.sys = 1,,
+
+[Manufacturer]
+%Mfg% = Std,NTARM64.10.0...16299
+
+[Std.NTARM64.10.0...16299]
+%Desc% = Batt_Inst, PIPA\PM8150B_BATT
+
+[Batt_Inst.NT]
+CopyFiles = Batt_Files
+
+[Batt_Files]
+pipabatt.sys
+
+[Batt_Inst.NT.Services]
+AddService = pipabatt, 0x00000002, Batt_Svc
+
+[Batt_Svc]
+DisplayName   = %Desc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %13%\pipabatt.sys
+
+[Batt_Inst.NT.Wdf]
+KmdfService = pipabatt, Batt_Wdf
+
+[Batt_Wdf]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+Mfg  = "woa-pipa"
+Disk = "pipabatt install disk"
+Desc = "pipa Battery (PM8150B fuel gauge)"
