@@ -229,6 +229,60 @@ static VOID SpmiProbe(VOID)
     if (SpmiRead(2, 0x41A2, b, 2) == 0) LOG("spmi: ibat %ld mA (neg = charging)", (LONG)(((LONGLONG)(SHORT)(b[1] << 8 | b[0]) * 488281) / 1000000));
 }
 
+/* ---------------- GPU power probe (opt-in: \SystemRoot\pipa_gpuprobe.flag) ----------------
+ * qcsmmu8250 froze the boot on MMU1 = Adreno SMMU @0x3DA0000, probably because the GPU CX domain was
+ * off. Turn on what Linux enables for adreno_smmu (gcc-sm8250.c / gpucc-sm8250.c) step by step, logging
+ * before each access so a hang shows exactly where. Only runs if the flag file exists (phase10 places it). */
+#define GCC_BASE    0x00100000ull
+#define GPUCC_BASE  0x03D90000ull
+#define GPUSMMU     0x03DA0000ull
+static BOOLEAN FileExists(PCWSTR path)
+{
+    UNICODE_STRING u; OBJECT_ATTRIBUTES oa; IO_STATUS_BLOCK io; HANDLE h; NTSTATUS st;
+    RtlInitUnicodeString(&u, path);
+    InitializeObjectAttributes(&oa, &u, OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE, NULL, NULL);
+    st = ZwOpenFile(&h, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &oa, &io, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_SYNCHRONOUS_IO_NONALERT);
+    if (NT_SUCCESS(st)) ZwClose(h);
+    return NT_SUCCESS(st);
+}
+static VOID GcSet(PUCHAR b, ULONG o, ULONG bits, PCSTR n)
+{
+    ULONG v = SR(b, o);
+    SW(b, o, v | bits);
+    KeStallExecutionProcessor(10);
+    LOG("gpu: %s [%05X] %08X -> %08X", n, o, v, SR(b, o));
+}
+static VOID GpuProbe(VOID)
+{
+    PUCHAR gcc, gcc52, gpucc, smmu; ULONG t, v;
+    if (!FileExists(L"\\SystemRoot\\pipa_gpuprobe.flag")) { LOG("gpu: probe off (no flag)"); return; }
+    gcc = MapPhys(GCC_BASE + 0x71000, 0x1000);
+    gcc52 = MapPhys(GCC_BASE + 0x52000, 0x1000);
+    gpucc = MapPhys(GPUCC_BASE, 0x9000);
+    smmu = MapPhys(GPUSMMU, 0x10000);
+    if (!gcc || !gcc52 || !gpucc || !smmu) { LOG("gpu: map failed"); return; }
+    LOG("gpu: step1 GCC branches");
+    GcSet(gcc, 0x004, 1, "gcc_gpu_cfg_ahb_clk");
+    GcSet(gcc52, 0x000, (1u << 15) | (1u << 16), "gcc_gpu_gpll0(_div)_clk_src votes");
+    GcSet(gcc, 0x00C, 1, "gcc_gpu_memnoc_gfx_clk");
+    GcSet(gcc, 0x018, 1, "gcc_gpu_snoc_dvm_gfx_clk");
+    LOG("gpu: step2 read GPUCC (needs cfg_ahb)");
+    LOG("gpu: cx_gdscr=%08X gx_gdscr=%08X hw_ctrl=%08X", SR(gpucc, 0x106C), SR(gpucc, 0x100C), SR(gpucc, 0x1540));
+    LOG("gpu: step3 GPUCC branches");
+    GcSet(gpucc, 0x1078, 1, "gpu_cc_ahb_clk");
+    GcSet(gpucc, 0x109C, 1, "gpu_cc_cxo_clk");
+    LOG("gpu: step4 CX GDSC on");
+    v = SR(gpucc, 0x106C);
+    SW(gpucc, 0x106C, v & ~1u);   /* clear SW_COLLAPSE */
+    for (t = 0; t < 1000 && !(SR(gpucc, 0x1540) & 0x80000000u); t++) KeStallExecutionProcessor(10);
+    LOG("gpu: cx_gdscr %08X -> %08X hw_ctrl=%08X after %lu0 us", v, SR(gpucc, 0x106C), SR(gpucc, 0x1540), t);
+    GcSet(gpucc, 0x5000, 1, "gpu_cc_hlos1_vote_gpu_smmu_clk");
+    LOG("gpu: step5 read Adreno SMMU");
+    LOG("gpu: smmu sCR0=%08X IDR0=%08X IDR1=%08X", SR(smmu, 0x0), SR(smmu, 0x20), SR(smmu, 0x24));
+    LOG("gpu: probe done - SMMU readable");
+    MmUnmapIoSpace(gcc, 0x1000); MmUnmapIoSpace(gcc52, 0x1000); MmUnmapIoSpace(gpucc, 0x9000); MmUnmapIoSpace(smmu, 0x10000);
+}
+
 static VOID MsSleep(ULONG ms) { LARGE_INTEGER t; t.QuadPart = -10000LL * ms; KeDelayExecutionThread(KernelMode, FALSE, &t); }
 
 static VOID UartSetup(PUCHAR se, ULONG div)
@@ -1044,6 +1098,7 @@ NTSTATUS PwrD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
     c->started = TRUE;
     SmmuMapPcie();
     SpmiProbe();
+    { static BOOLEAN once; if (!once) { once = TRUE; GpuProbe(); } }
     if (!c->battAdded) {
         NTSTATUS bst = AddSimpleChild(c, L"PIPA\\PM8150B_BATT", L"01", L"pipa Battery");
         c->battAdded = NT_SUCCESS(bst);
