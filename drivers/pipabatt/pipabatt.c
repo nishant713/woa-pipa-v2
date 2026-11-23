@@ -31,6 +31,7 @@ typedef struct _BATT_CTX {
     ULONG     tag;
     BOOLEAN   notifyArmed;
     ULONG     ticks, ioctls;
+    WDFWORKITEM ifWork;
 } BATT_CTX, *PBATT_CTX;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(BATT_CTX, BattCtx)
 
@@ -226,7 +227,7 @@ EVT_WDF_TIMER BattTimer;
 EVT_WDFDEVICE_WDM_IRP_PREPROCESS BattIoctlPre;
 
 static const GUID PipaGuidBattery = { 0x72631e54, 0x78a4, 0x11d0, { 0xbc, 0xf7, 0x00, 0xaa, 0x00, 0xb7, 0xb3, 0x2a } };   /* GUID_DEVICE_BATTERY */
-static VOID DumpInterfaces(PBATT_CTX c)
+static ULONG DumpInterfaces(PBATT_CTX c)
 {
     PWSTR list = NULL, p; NTSTATUS st; ULONG n = 0;
     st = IoGetDeviceInterfaces(&PipaGuidBattery, NULL, 0, &list);
@@ -236,13 +237,31 @@ static VOID DumpInterfaces(PBATT_CTX c)
         if (!n) LOG("  (none enabled)");
         ExFreePool(list);
     }
+    return n;
+}
+
+/* battc registered nothing visible: publish GUID_DEVICE_BATTERY on our PDO ourselves so the power manager opens us */
+EVT_WDF_WORKITEM BattIfWork;
+VOID BattIfWork(WDFWORKITEM w)
+{
+    PBATT_CTX c = BattCtx(WdfWorkItemGetParentObject(w));
+    UNICODE_STRING link; NTSTATUS st;
+    if (DumpInterfaces(c)) return;
+    st = IoRegisterDeviceInterface(WdfDeviceWdmGetPhysicalDevice(c->dev), &PipaGuidBattery, NULL, &link);
+    LOG("IoRegisterDeviceInterface st=%08X", st);
+    if (NT_SUCCESS(st)) {
+        st = IoSetDeviceInterfaceState(&link, TRUE);
+        LOG("IoSetDeviceInterfaceState %wZ st=%08X", &link, st);
+        RtlFreeUnicodeString(&link);
+    }
+    DumpInterfaces(c);
 }
 
 VOID BattTimer(WDFTIMER t)
 {
     PBATT_CTX c = BattCtx(WdfTimerGetParentObject(t));
     if (c->classHandle) BatteryClassStatusNotify(c->classHandle);
-    c->ticks++;
+    if (c->ticks++ == 0 && c->ifWork) WdfWorkItemEnqueue(c->ifWork);   /* ~2 s after start */
 }
 
 
@@ -344,6 +363,12 @@ NTSTATUS BattDeviceAdd(WDFDRIVER drv, PWDFDEVICE_INIT init)
     WDF_OBJECT_ATTRIBUTES_INIT(&a); a.ParentObject = dev;   /* DISPATCH: KMDF rejects periodic passive timers (C00000BB) */
     tc.AutomaticSerialization = FALSE;
     st = WdfTimerCreate(&tc, &a, &c->timer);
+    if (NT_SUCCESS(st)) {
+        WDF_WORKITEM_CONFIG wc;
+        WDF_WORKITEM_CONFIG_INIT(&wc, BattIfWork);
+        WDF_OBJECT_ATTRIBUTES_INIT(&a); a.ParentObject = dev;
+        st = WdfWorkItemCreate(&wc, &a, &c->ifWork);
+    }
     LOG("device add st=%08X", st);
     return st;
 }
