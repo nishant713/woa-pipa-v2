@@ -889,13 +889,14 @@ static NTSTATUS AddChild(PFDO_CTX c)
 
 /* ---------------- bring-up thread ---------------- */
 /* battery: a second static child, PIPA\PM8150B_BATT, for pipabatt.sys (reads the PM8150B fuel gauge over SPMI) */
-static NTSTATUS AddBattChild(PFDO_CTX c)
+/* also used for COMPOSITE_BATTERY: this install has no root-enumerated composite battery (compbatt.sys),
+ * and without it nothing opens our battery and the shell shows no battery icon. battery.inf binds it. */
+static NTSTATUS AddSimpleChild(PFDO_CTX c, PCWSTR hwidS, PCWSTR instS, PCWSTR textS)
 {
     PWDFDEVICE_INIT init; NTSTATUS st; WDFDEVICE child; WDF_OBJECT_ATTRIBUTES a;
-    DECLARE_CONST_UNICODE_STRING(hwid, L"PIPA\\PM8150B_BATT");
-    DECLARE_CONST_UNICODE_STRING(inst, L"01");
-    DECLARE_CONST_UNICODE_STRING(text, L"pipa Battery");
-    DECLARE_CONST_UNICODE_STRING(loc, L"pm8150b fg");
+    UNICODE_STRING hwid, inst, text;
+    DECLARE_CONST_UNICODE_STRING(loc, L"pipapwr");
+    RtlInitUnicodeString(&hwid, hwidS); RtlInitUnicodeString(&inst, instS); RtlInitUnicodeString(&text, textS);
     init = WdfPdoInitAllocate(c->dev);
     if (!init) return STATUS_INSUFFICIENT_RESOURCES;
     st = WdfPdoInitAssignDeviceID(init, &hwid);
@@ -1045,7 +1046,12 @@ NTSTATUS PwrD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
     c->started = TRUE;
     SmmuMapPcie();
     SpmiProbe();
-    if (!c->battAdded) { NTSTATUS bst = AddBattChild(c); c->battAdded = NT_SUCCESS(bst); LOG("battery child PDO st=%08X", bst); }
+    if (!c->battAdded) {
+        NTSTATUS bst = AddSimpleChild(c, L"PIPA\\PM8150B_BATT", L"01", L"pipa Battery"), cst;
+        c->battAdded = NT_SUCCESS(bst);
+        cst = AddSimpleChild(c, L"COMPOSITE_BATTERY", L"02", L"Composite Battery");
+        LOG("battery child PDO st=%08X composite battery PDO st=%08X", bst, cst);
+    }
     {   /* uart6's interrupt gets connected right after this callback: clock SE6 and mask it first */
         PUCHAR g = MapPhys(GCC_VOTE_PAGE, 0x1000), se;
         if (g) { WRITE_REGISTER_ULONG((volatile ULONG *)(g + 0x8), READ_REGISTER_ULONG((volatile ULONG *)(g + 0x8)) | (1u << 16)); MmUnmapIoSpace(g, 0x1000); }
