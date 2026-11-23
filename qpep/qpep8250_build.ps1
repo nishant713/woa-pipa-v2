@@ -26,7 +26,7 @@ try {
     if (Test-Path $p) { & $signtool.FullName sign /fd sha256 /f (Join-Path $root 'pipa_test_cert.pfx') /p pipa $p; Write-Host "signed $f exit $LASTEXITCODE" }
   }
   # pipa test drivers (drivers\<name>): KTZ8866 backlight, NT36532 touch SPI, pipapwr
-  foreach ($dn in @('ktz8866','nt36532spi','pipapwr','pipabatt')) {
+  foreach ($dn in @('ktz8866','nt36532spi','pipapwr','pipabatt','pipagpu')) {
     $kz = Join-Path $repo "drivers\$dn"; $kout = Join-Path $out $dn
     if (-not (Test-Path $kz)) { continue }
     New-Item -ItemType Directory -Force $kout | Out-Null
