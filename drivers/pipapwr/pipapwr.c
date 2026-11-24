@@ -1041,6 +1041,18 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
 {
     WDF_DRIVER_CONFIG cfg;
     HANDLE th;
+    {   /* arm from the service key: HangCatcherSec (DWORD), written by phase10 when claude\hang_catcher.txt exists */
+        RTL_QUERY_REGISTRY_TABLE q[2]; ULONG v = 0, def = 0;
+        RtlZeroMemory(q, sizeof(q));
+        q[0].Flags = RTL_QUERY_REGISTRY_DIRECT | RTL_QUERY_REGISTRY_TYPECHECK;
+        q[0].Name = L"HangCatcherSec"; q[0].EntryContext = &v;
+        q[0].DefaultType = (REG_DWORD << RTL_QUERY_REGISTRY_TYPECHECK_SHIFT) | REG_DWORD;
+        q[0].DefaultData = &def; q[0].DefaultLength = sizeof(ULONG);
+        if (NT_SUCCESS(RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, path->Buffer, q, NULL, NULL)) && v) {
+            g_PipaBugcheckSec = v;
+            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "pipapwr: hang catcher armed: bugcheck 0xE2 after %lu s\n", v);
+        }
+    }
     if (NT_SUCCESS(PsCreateSystemThread(&th, THREAD_ALL_ACCESS, NULL, NULL, NULL, HangCatcher, NULL))) ZwClose(th);
     WDF_DRIVER_CONFIG_INIT(&cfg, PwrDeviceAdd);
     return WdfDriverCreate(drv, path, WDF_NO_OBJECT_ATTRIBUTES, &cfg, WDF_NO_HANDLE);
