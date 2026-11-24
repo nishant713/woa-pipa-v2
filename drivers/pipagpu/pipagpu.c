@@ -44,6 +44,14 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
     Set(gpucc, 0x5000, 1);                         /* gpu_cc_hlos1_vote_gpu_smmu_clk */
     LOG("GPU CX on: gdscr %08X -> %08X hw_ctrl %08X (%lu0 us); gpu smmu sCR0=%08X IDR0=%08X",
         v, R(gpucc, 0x106C), R(gpucc, 0x1540), t, R(smmu, 0), R(smmu, 0x20));
+    /* Experiment: GX GDSC (GPU_CC_GX_GDSCR 0x100C). Normally the GMU owns it; qcdxkm8250 seems to
+       touch GX registers and stall the bus. Clear SW_COLLAPSE and poll PWR_ON (bit31) with a timeout;
+       this only succeeds if the GFX rail is already up. Never touches GX registers itself. */
+    v = R(gpucc, 0x100C);
+    W(gpucc, 0x100C, v & ~1u);
+    for (t = 0; t < 1000 && !(R(gpucc, 0x100C) & 0x80000000u); t++) KeStallExecutionProcessor(10);
+    LOG("GX gdscr %08X -> %08X (%lu0 us) %s", v, R(gpucc, 0x100C), t,
+        (R(gpucc, 0x100C) & 0x80000000u) ? "ON" : "did not power up (GFX rail off?)");
     MmUnmapIoSpace(gcc71, 0x1000); MmUnmapIoSpace(gcc52, 0x1000); MmUnmapIoSpace(gpucc, 0x9000); MmUnmapIoSpace(smmu, 0x1000);
     return STATUS_SUCCESS;
 }
