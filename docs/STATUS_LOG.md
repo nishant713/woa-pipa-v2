@@ -1,3 +1,9 @@
+## 2026-11-24 22:50: Wi-Fi data path WORKS (PCI0._CCA = 0)
+
+Tip from another pipa porter: the PCIe0 root (Wi-Fi QCA6390) is not DMA-coherent. DSDT `PCI0._CCA` changed from `Return (One)` to `Return (Zero)` (one AML byte + checksum) in the panel image -> `claude\Mu-pipa-pcie-release-v2-pipapanel-cca0.img` (md5 39ee624c). Wi-Fi connects and internet works. This image is now the default for `1.RUN_QPEP_CYCLE.bat` and `4.RUN_KD_BOOT_PANEL.bat`. (PCI1 `_CCA` left at 1.) The gpu2 image also has a `_CCA=0` variant (`...-gpu2-cca0.img`).
+
+---
+
 # Status log
 
 ## 2026-11-24 22:35: GPU — powered and past the SMMU; blocked on secure kernel (VBS) dependency
