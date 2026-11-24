@@ -73,8 +73,13 @@ static VOID RpmhWrite(PUCHAR tcs, const char *name, ULONG addr, ULONG lvl)
     for (t = 0; t < 10000 && !(R(tcs, 0x04) & (1u << id)); t++) KeStallExecutionProcessor(10);
     LOG("rpmh: tcs%lu %s=%lu irq_status=%08X cmd_status=%08X (%lu0 us)%s", id, name, lvl,
         R(tcs, 0x04), R(c, 0x3C), t, t >= 10000 ? " TIMEOUT" : "");
+    /* leave the TCS exactly as the PEP's RPMh survey expects a quiescent one: no enable, no
+       wait-for-completion, no AMC mode, no pending IRQ (a leftover WAIT bit marks it "configured") */
+    W(c, 0x1C, 0); W(c, 0x10, 0); W(c, 0x14, 0);
+    W(c, 0x30, 0); W(c, 0x34, 0); W(c, 0x38, 0);
     W(tcs, 0x08, 1u << id);
-    W(c, 0x1C, 0); W(c, 0x14, 0);
+    LOG("rpmh: tcs%lu after cleanup ctrl=%08X en=%08X wait=%08X status=%08X irq_en=%08X irq_st=%08X", id,
+        R(c, 0x14), R(c, 0x1C), R(c, 0x10), R(c, 0x18), R(tcs, 0x00), R(tcs, 0x04));
 }
 
 static VOID VoteGfxRail(VOID)
