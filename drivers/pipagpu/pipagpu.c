@@ -20,6 +20,74 @@ static ULONG R(PUCHAR b, ULONG o) { return READ_REGISTER_ULONG((volatile ULONG *
 static VOID  W(PUCHAR b, ULONG o, ULONG v) { WRITE_REGISTER_ULONG((volatile ULONG *)(b + o), v); }
 static VOID  Set(PUCHAR b, ULONG o, ULONG bits) { W(b, o, R(b, o) | bits); KeStallExecutionProcessor(10); }
 
+
+/* ---- RPMh: vote the GFX rail (ARC "gfx.lvl") through an apps-RSC active TCS ----
+ * cmd-db (reserved mem 0x80820000, sm8250.dtsi aop_cmd_db_mem) gives the ARC address and level
+ * table; apps RSC DRV2 @0x18220000, TCS block +0xD00, TCS stride 0x2A0, cmd stride 0x14
+ * (rpmh-rsc.c, sm8250 tcs-config: ACTIVE 2 first). One write, response required, then poll. */
+#pragma pack(push, 1)
+typedef struct { USHORT slv, hdr_off, data_off, cnt, ver, rsvd[3]; } RSC_HDR;
+typedef struct { UCHAR id[8]; ULONG prio[2]; ULONG addr; USHORT len, off; } ENT_HDR;
+#pragma pack(pop)
+
+static BOOLEAN CmdDbFind(PUCHAR db, const char *name, ULONG *addr, ULONG *lvl)
+{
+    PUCHAR data = db + 8 + 8 * sizeof(RSC_HDR) + 8;
+    ULONG i, j, k;
+    if (db[4] != 0xDB || db[5] != 0x30 || db[6] != 0x03 || db[7] != 0x0C) { LOG("cmd-db: bad magic %02X%02X%02X%02X", db[4], db[5], db[6], db[7]); return FALSE; }
+    for (i = 0; i < 8; i++) {
+        RSC_HDR *h = (RSC_HDR *)(db + 8 + i * sizeof(RSC_HDR));
+        if (!h->cnt) continue;
+        for (j = 0; j < h->cnt; j++) {
+            ENT_HDR *e = (ENT_HDR *)(data + h->hdr_off + j * sizeof(ENT_HDR));
+            for (k = 0; k < 8 && name[k] && e->id[k] == (UCHAR)name[k]; k++);
+            if (k < 8 && (name[k] || e->id[k])) continue;
+            {
+                USHORT *v = (USHORT *)(data + h->data_off + e->off);
+                ULONG n = e->len / 2, best = n ? n - 1 : 0;
+                for (k = 0; k < n; k++) if (v[k] >= 256) { best = k; break; }   /* first >= NOM */
+                LOG("cmd-db: %s addr=%05X levels=%lu pick hlvl %lu (vlvl %u)", name, e->addr, n, best, n ? v[best] : 0);
+                *addr = e->addr; *lvl = best; return TRUE;
+            }
+        }
+    }
+    LOG("cmd-db: %s not found", name); return FALSE;
+}
+
+static VOID VoteGfxRail(VOID)
+{
+    PUCHAR io = Map(0x80820000ull, 0x20000), rsc = Map(0x18220000ull, 0x4000), tcs;
+    PUCHAR db = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 0x20000, 'ugpP');
+    ULONG addr, lvl, t, id;
+    if (!io || !rsc || !db) { LOG("rpmh: map/alloc failed io=%p rsc=%p", io, rsc); goto out; }
+    /* copy with aligned 32-bit reads: device mappings fault on the unaligned accesses parsing needs */
+    for (t = 0; t < 0x20000; t += 4) *(ULONG *)(db + t) = R(io, t);
+    if (!CmdDbFind(db, "gfx.lvl", &addr, &lvl)) goto out;
+    tcs = rsc + 0xD00;
+    for (id = 0; id < 2; id++) if (R(tcs + id * 0x2A0, 0x18)) break;       /* DRV_STATUS != 0 -> idle */
+    if (id == 2) { LOG("rpmh: no idle active TCS"); goto out; }
+    {
+        PUCHAR c = tcs + id * 0x2A0;
+        W(c, 0x30, 8 | (1u << 8) | (1u << 16));     /* MSGID: len 8, resp req, write */
+        W(c, 0x34, addr);
+        W(c, 0x38, lvl);
+        W(c, 0x10, 1);                              /* wait for completion on cmd0 */
+        W(c, 0x1C, 1);                              /* enable cmd0 */
+        W(c, 0x14, 0);
+        W(c, 0x14, 1u << 16);                       /* AMC mode */
+        W(c, 0x14, (1u << 16) | (1u << 24));        /* trigger */
+        for (t = 0; t < 10000 && !(R(tcs, 0x04) & (1u << id)); t++) KeStallExecutionProcessor(10);
+        LOG("rpmh: tcs%lu gfx.lvl=%lu irq_status=%08X cmd_status=%08X (%lu0 us)%s", id, lvl,
+            R(tcs, 0x04), R(c, 0x3C), t, t >= 10000 ? " TIMEOUT" : "");
+        W(tcs, 0x08, 1u << id);                     /* clear irq */
+        W(c, 0x1C, 0); W(c, 0x14, 0);
+    }
+out:
+    if (io) MmUnmapIoSpace(io, 0x20000);
+    if (db) ExFreePoolWithTag(db, 'ugpP');
+    if (rsc) MmUnmapIoSpace(rsc, 0x4000);
+}
+
 static VOID Unload(PDRIVER_OBJECT d) { UNREFERENCED_PARAMETER(d); }
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
@@ -44,14 +112,20 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
     Set(gpucc, 0x5000, 1);                         /* gpu_cc_hlos1_vote_gpu_smmu_clk */
     LOG("GPU CX on: gdscr %08X -> %08X hw_ctrl %08X (%lu0 us); gpu smmu sCR0=%08X IDR0=%08X",
         v, R(gpucc, 0x106C), R(gpucc, 0x1540), t, R(smmu, 0), R(smmu, 0x20));
-    /* Experiment: GX GDSC (GPU_CC_GX_GDSCR 0x100C). Normally the GMU owns it; qcdxkm8250 seems to
-       touch GX registers and stall the bus. Clear SW_COLLAPSE and poll PWR_ON (bit31) with a timeout;
-       this only succeeds if the GFX rail is already up. Never touches GX registers itself. */
+    VoteGfxRail();
+    /* GX GDSC (GPU_CC_GX_GDSCR 0x100C, CFG 0x1010, clamp 0x1508 - gpucc-sm8250.c gpu_gx_gdsc).
+       Never touches GPU core registers itself. */
     v = R(gpucc, 0x100C);
     W(gpucc, 0x100C, v & ~1u);
-    for (t = 0; t < 1000 && !(R(gpucc, 0x100C) & 0x80000000u); t++) KeStallExecutionProcessor(10);
-    LOG("GX gdscr %08X -> %08X (%lu0 us) %s", v, R(gpucc, 0x100C), t,
-        (R(gpucc, 0x100C) & 0x80000000u) ? "ON" : "did not power up (GFX rail off?)");
+    for (t = 0; t < 1000 && !(R(gpucc, 0x100C) & 0x80000000u) && !(R(gpucc, 0x1010) & 0x10000u); t++)
+        KeStallExecutionProcessor(10);
+    if ((R(gpucc, 0x100C) & 0x80000000u) || (R(gpucc, 0x1010) & 0x10000u)) {
+        W(gpucc, 0x1508, R(gpucc, 0x1508) & ~1u);           /* release GX IO clamp */
+        LOG("GX ON: gdscr %08X -> %08X cfg %08X clamp %08X (%lu0 us)", v, R(gpucc, 0x100C), R(gpucc, 0x1010), R(gpucc, 0x1508), t);
+    } else {
+        W(gpucc, 0x100C, v);                                 /* give up: restore collapse */
+        LOG("GX did not power up: gdscr %08X cfg %08X (%lu0 us) - restored", R(gpucc, 0x100C), R(gpucc, 0x1010), t);
+    }
     MmUnmapIoSpace(gcc71, 0x1000); MmUnmapIoSpace(gcc52, 0x1000); MmUnmapIoSpace(gpucc, 0x9000); MmUnmapIoSpace(smmu, 0x1000);
     return STATUS_SUCCESS;
 }
