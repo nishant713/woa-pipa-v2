@@ -56,9 +56,16 @@ static BOOLEAN CmdDbFind(PUCHAR db, const char *name, ULONG *addr, ULONG *lvl)
 
 static VOID VoteGfxRail(VOID)
 {
-    PUCHAR io = Map(0x80820000ull, 0x20000), rsc = Map(0x18220000ull, 0x4000), tcs;
+    PUCHAR io = NULL, rsc = Map(0x18220000ull, 0x4000), tcs;
     PUCHAR db = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 0x20000, 'ugpP');
-    ULONG addr, lvl, t, id;
+    ULONG addr, lvl, t, id, dbpa = 0x80820000, dblen = 0;
+    {   /* AOP msg RAM dictionary (downstream "qcom,cmd-db" reg 0xC3F000C): cmd-db base, size */
+        PUCHAR dict = Map(0x0C3F0000ull, 0x1000);
+        if (dict) { dbpa = R(dict, 0xC); dblen = R(dict, 0x10); MmUnmapIoSpace(dict, 0x1000); }
+        LOG("cmd-db: dictionary base=%08X size=%X", dbpa, dblen);
+        if (!dbpa || dbpa == 0xFFFFFFFF) dbpa = 0x80820000;
+    }
+    io = Map(dbpa, 0x20000);
     if (!io || !rsc || !db) { LOG("rpmh: map/alloc failed io=%p rsc=%p", io, rsc); goto out; }
     /* copy with aligned 32-bit reads: device mappings fault on the unaligned accesses parsing needs */
     for (t = 0; t < 0x20000; t += 4) *(ULONG *)(db + t) = R(io, t);
