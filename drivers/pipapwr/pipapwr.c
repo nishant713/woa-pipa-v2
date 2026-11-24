@@ -1017,9 +1017,31 @@ static VOID BtThread(PVOID ctx)
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
+/* Hang catcher: when a stuck CPU blocks debugger break-in, set this from WinDbg
+   (ed pipapwr!g_PipaBugcheckSec 0n120) and the watchdog thread bugchecks (0xE2, manually initiated)
+   that many seconds after driver load, so the debugger gets control with every CPU's state. */
+volatile ULONG g_PipaBugcheckSec = 0;
+
+static VOID HangCatcher(PVOID ctx)
+{
+    LARGE_INTEGER d; ULONGLONG t0 = KeQueryInterruptTime();
+    UNREFERENCED_PARAMETER(ctx);
+    d.QuadPart = -10000000LL;                 /* 1 s */
+    for (;;) {
+        ULONG lim = g_PipaBugcheckSec;
+        KeDelayExecutionThread(KernelMode, FALSE, &d);
+        if (lim && (KeQueryInterruptTime() - t0) / 10000000ULL >= lim) {
+            DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "pipapwr: hang catcher firing after %lu s\n", lim);
+            KeBugCheckEx(0xE2, 0x50495041, lim, 0, 0);
+        }
+    }
+}
+
 NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
 {
     WDF_DRIVER_CONFIG cfg;
+    HANDLE th;
+    if (NT_SUCCESS(PsCreateSystemThread(&th, THREAD_ALL_ACCESS, NULL, NULL, NULL, HangCatcher, NULL))) ZwClose(th);
     WDF_DRIVER_CONFIG_INIT(&cfg, PwrDeviceAdd);
     return WdfDriverCreate(drv, path, WDF_NO_OBJECT_ATTRIBUTES, &cfg, WDF_NO_HANDLE);
 }
