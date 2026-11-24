@@ -131,7 +131,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
     W(gpucc, 0x106C, v & ~1u);                     /* GPU CX GDSC: clear SW_COLLAPSE */
     for (t = 0; t < 1000 && !(R(gpucc, 0x1540) & 0x80000000u); t++) KeStallExecutionProcessor(10);
     Set(gpucc, 0x5000, 1);                         /* gpu_cc_hlos1_vote_gpu_smmu_clk */
-    /* remaining GPUCC CX branches fed by AHB/CXO (gpucc-sm8250.c): the GPU SMMU's implementation
+    /* (after the CX GDSC is up, or the branch registers do not hold) remaining GPUCC CX branches fed by AHB/CXO (gpucc-sm8250.c): the GPU SMMU's implementation
        page (0x3DA6000) stalled qcsmmu's write with only the above on */
     Set(gpucc, 0x107C, 1);                         /* gpu_cc_crc_ahb_clk */
     Set(gpucc, 0x1088, 1);                         /* gpu_cc_cx_apb_clk */
