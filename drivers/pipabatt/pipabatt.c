@@ -82,7 +82,8 @@ static VOID Sample(PBATT_CTX c, BATT_SAMPLE *s)
     UCHAR b[4] = { 0 }; NTSTATUS st; ULONG raw;
     RtlZeroMemory(s, sizeof(*s));
     WdfSpinLockAcquire(c->lock);
-    st = SpmiRead(c, 2, 0x4009, b, 2);                       /* BATT_MONOTONIC_SOC */
+    {   ULONG r; st = STATUS_IO_DEVICE_ERROR;                 /* BATT_MONOTONIC_SOC; the bus is shared, retry */
+        for (r = 0; r < 5 && !NT_SUCCESS(st); r++) { if (r) KeStallExecutionProcessor(200); st = SpmiRead(c, 2, 0x4009, b, 2); } }
     if (NT_SUCCESS(st)) {
         raw = b[0] < b[1] ? b[0] : b[1];
         s->socPermille = raw <= 1 ? 0 : ((raw - 1) * 1000 + 126) / 253;
@@ -292,7 +293,7 @@ NTSTATUS BattPrepare(WDFDEVICE dev, WDFCMRESLIST raw, WDFCMRESLIST xlat)
     Sample(c, &s);
     LOG("ok=%u soc=%lu.%lu%% %lu mV %ld mA %ld.%ld C online=%u chg=%u", s.ok, s.socPermille / 10, s.socPermille % 10,
         s.mV, s.mA, s.tempDeciC / 10, s.tempDeciC % 10, s.online, s.chgState);
-    if (!s.ok) return STATUS_DEVICE_NOT_READY;
+    if (!s.ok) LOG("first SOC read failed - starting anyway, later polls will update");
     c->tag = 1;
     if (!c->classHandle) {
         RtlZeroMemory(&mi, sizeof(mi));
