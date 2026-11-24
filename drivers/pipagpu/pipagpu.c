@@ -113,15 +113,14 @@ static VOID Unload(PDRIVER_OBJECT d) { UNREFERENCED_PARAMETER(d); }
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
 {
-    PUCHAR gcc71, gcc52, gpucc, smmu, smmu6; ULONG t, v;
+    PUCHAR gcc71, gcc52, gpucc, smmu; ULONG t, v;
     UNREFERENCED_PARAMETER(path);
     drv->DriverUnload = Unload;
     gcc71 = Map(0x00171000ull, 0x1000);
     gcc52 = Map(0x00152000ull, 0x1000);
     gpucc = Map(0x03D90000ull, 0x9000);
     smmu  = Map(0x03DA0000ull, 0x1000);
-    smmu6 = Map(0x03DA6000ull, 0x1000);
-    if (!gcc71 || !gcc52 || !gpucc || !smmu || !smmu6) { LOG("map failed"); return STATUS_SUCCESS; }
+    if (!gcc71 || !gcc52 || !gpucc || !smmu) { LOG("map failed"); return STATUS_SUCCESS; }
     Set(gcc71, 0x004, 1);                          /* gcc_gpu_cfg_ahb_clk */
     Set(gcc52, 0x000, (1u << 15) | (1u << 16));    /* gcc_gpu_gpll0(_div)_clk_src votes */
     Set(gcc71, 0x00C, 1);                          /* gcc_gpu_memnoc_gfx_clk */
@@ -140,9 +139,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
     Set(gpucc, 0x1004, 1);                         /* gpu_cc_cxo_aon_clk */
     LOG("CX branches: crc_ahb=%08X cx_apb=%08X cx_snoc_dvm=%08X cxo_aon=%08X",
         R(gpucc, 0x107C), R(gpucc, 0x1088), R(gpucc, 0x108C), R(gpucc, 0x1004));
-    LOG("probe: reading GPU SMMU impl page 0x3DA6000 (qcsmmu's write to 0x3DA6008 stalls) ...");
-    LOG("probe: 3DA6000=%08X 3DA6004=%08X 3DA6008=%08X 3DA600C=%08X",
-        R(smmu6, 0x0), R(smmu6, 0x4), R(smmu6, 0x8), R(smmu6, 0xC));
+    /* 0x3DA6000 (GPU SMMU "implementation defined 1" page) is NOT readable from HLOS: a read hangs the CPU */
     LOG("GPU CX on: gdscr %08X -> %08X hw_ctrl %08X (%lu0 us); gpu smmu sCR0=%08X IDR0=%08X",
         v, R(gpucc, 0x106C), R(gpucc, 0x1540), t, R(smmu, 0), R(smmu, 0x20));
     VoteGfxRail();
@@ -162,6 +159,6 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
         W(gpucc, 0x1508, R(gpucc, 0x1508) | 1u);
         LOG("GX did not power up: gdscr %08X cfg %08X (%lu0 us) - restored", R(gpucc, 0x100C), R(gpucc, 0x1010), t);
     }
-    MmUnmapIoSpace(gcc71, 0x1000); MmUnmapIoSpace(gcc52, 0x1000); MmUnmapIoSpace(gpucc, 0x9000); MmUnmapIoSpace(smmu, 0x1000); MmUnmapIoSpace(smmu6, 0x1000);
+    MmUnmapIoSpace(gcc71, 0x1000); MmUnmapIoSpace(gcc52, 0x1000); MmUnmapIoSpace(gpucc, 0x9000); MmUnmapIoSpace(smmu, 0x1000);
     return STATUS_SUCCESS;
 }
