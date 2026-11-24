@@ -1,5 +1,33 @@
 # Status log
 
+## 2026-11-24 22:35: GPU — powered and past the SMMU; blocked on secure kernel (VBS) dependency
+
+**Where it stands:** with the GPU-fix UEFI image (`claude\Mu-pipa-pcie-release-v2-gpu2.img`, local) Windows reaches the sign-in screen with the basic display driver. Then the Adreno adapter start takes over the panel (screen goes blank, backlight on) and fails. Panel image (`Mu-pipa-pcie-release-v2-pipapanel.img`) = normal desktop, Adreno Code 43.
+
+**Fixed today (in order):**
+1. GPU0 `_CRS` was missing the two panel GPIOs that `RESI` expects (RESI/_CRS mismatch → Code 43). gpu2 image adds them.
+2. GPU power (`drivers/pipagpu`, boot-start, on while `claude\gpu_power_on.txt` exists):
+   - cmd-db located via AOP msg RAM dictionary 0x0C3F000C → base 0x80860000 (not Linux's 0x80820000). `mx.lvl` @0x30010, `gfx.lvl` @0x30050.
+   - RPMh votes through apps RSC DRV2 (0x18220000, TCS +0xD00, stride 0x2A0) active TCS0: MX → NOM (hlvl 5), then GFX → SVS (hlvl 3). Completes in 10–20 µs.
+   - **The TCS must be left fully clean** (enable, wait-for-completion, ctrl, cmd regs = 0; IRQ cleared). A leftover wait bit makes our PEP's RPMh survey see a "configured" TCS → reset a second later.
+   - GX GDSC: release GMEM clamp (0x1508 bit0), GMEM reset pulse (bit4), then clear SW_COLLAPSE in 0x100C → GX on (`F8222000`).
+   - GPUCC CX branch enables beyond AHB/CXO/SMMU vote (0x107C/0x1088/0x108C/0x1004) do NOT stick from HLOS.
+3. Hard hang at GPU adapter start (CLOCK_WATCHDOG_TIMEOUT): qcsmmu8250 writes the GPU page-table base into the GPU SMMU "implementation defined 1" page, **0x3DA6008**. Any access to 0x3DA6000 (even a read) hangs the CPU on pipa. Fix: local `qcsmmu8250.inf` `Parameters\1\OFFI` page 6 → 0xFF (both sections; orig `.pre_offi`).
+4. Debug tooling: `pipapwr` hang catcher (service value `HangCatcherSec`, phase10 writes it while `claude\hang_catcher.txt` exists → bugcheck 0xE2 after N s); qcdx event ring at qcdxkm8250+0x1c6b80 (entries 0x28 bytes: ts, seq, caller, status, ids) dumped by `kd_qcdxlog.txt`; qcdx debug flag +0x1c6de0 bit5 + `Kd_IHVVIDEO_Mask`.
+
+**Current blocker:** adapter start waits 30 s for device interface `{41c66d2a-a9f1-40ca-a329-ae096c03ee68}`, published by **qcscm8250** (SCM, `ACPI\QCOM250B`) but left Disabled. SCM enables it only when flags `0x111` are set: 0x001 at its own start, 0x010/0x100 when interfaces `{ae865c08-4a07-404d-be51-d9a0465e23e5}` and `{eb3c7242-1b1a-4d51-ab55-f268f018f860}` arrive. Those belong to "Microsoft Windows Trusted Runtime Secure Service" devices (WindowsTrustedRTProxy, parent TrEE `ACPI\QCOM2576`) = VBS trustlets, which need the Windows hypervisor at EL2. Not available on pipa (Android devcfg; Secure Launch/slbounce not allowed). After the timeout qcdx's cleanup path waits at DISPATCH_LEVEL → bugcheck 0xA in qcdxkm8250+0x2c7750.
+
+**Next options (need a decision):**
+1. Patch `qcdxkm8250.sys` so the 30 s interface wait counts as success (quick; may fail later where SCM is used; no DRM/HDCP).
+2. Patch `qcscm8250.sys` to enable `{41c66d2a}` without the trustlet interfaces (plain TZ SMC services still work; boot-start, riskier).
+Both local only, re-signed with the pipa test cert like qcsmmu.
+
+**Also pending:** Wi-Fi tip from another pipa porter — `PCI0._CCA` → 0 fixes the Wi-Fi data path. Image built: `claude\Mu-pipa-pcie-release-v2-gpu2-cca0.img` + `8.RUN_QPEP_CYCLE_GPU2_CCA0.bat` (gpu2 base, so it hits the GPU crash; a panel-based `_CCA=0` image is still to be made). Speakers, touch mid-session failure, USB host still open.
+
+**Launchers added:** `7.RUN_QPEP_CYCLE_GPU2.bat` (full install + gpu2 boot), `9.RUN_KD_QUICK_GPU2.bat`, `kd_*.txt` scripts, `tablet_scripts\scm_iface.cmd`, `scm_deps.cmd`, `scm_deps2.cmd`. After repeated crashes boot stops at the Si logo → `RUN_FIX_BOOTSTATUS.bat`.
+
+---
+
 ## 2026-11-17 23:30: PEP plan switched to QualcommPEP port; toolchain works
 
 - Assessment: `docs/QUALCOMMPEP_ASSESSMENT.md` (feasible, better long-term; qcpep patching parked).
