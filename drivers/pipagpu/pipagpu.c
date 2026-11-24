@@ -131,6 +131,14 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
     W(gpucc, 0x106C, v & ~1u);                     /* GPU CX GDSC: clear SW_COLLAPSE */
     for (t = 0; t < 1000 && !(R(gpucc, 0x1540) & 0x80000000u); t++) KeStallExecutionProcessor(10);
     Set(gpucc, 0x5000, 1);                         /* gpu_cc_hlos1_vote_gpu_smmu_clk */
+    /* remaining GPUCC CX branches fed by AHB/CXO (gpucc-sm8250.c): the GPU SMMU's implementation
+       page (0x3DA6000) stalled qcsmmu's write with only the above on */
+    Set(gpucc, 0x107C, 1);                         /* gpu_cc_crc_ahb_clk */
+    Set(gpucc, 0x1088, 1);                         /* gpu_cc_cx_apb_clk */
+    Set(gpucc, 0x108C, 1);                         /* gpu_cc_cx_snoc_dvm_clk */
+    Set(gpucc, 0x1004, 1);                         /* gpu_cc_cxo_aon_clk */
+    LOG("CX branches: crc_ahb=%08X cx_apb=%08X cx_snoc_dvm=%08X cxo_aon=%08X",
+        R(gpucc, 0x107C), R(gpucc, 0x1088), R(gpucc, 0x108C), R(gpucc, 0x1004));
     LOG("GPU CX on: gdscr %08X -> %08X hw_ctrl %08X (%lu0 us); gpu smmu sCR0=%08X IDR0=%08X",
         v, R(gpucc, 0x106C), R(gpucc, 0x1540), t, R(smmu, 0), R(smmu, 0x20));
     VoteGfxRail();
