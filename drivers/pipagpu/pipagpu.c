@@ -30,7 +30,7 @@ typedef struct { USHORT slv, hdr_off, data_off, cnt, ver, rsvd[3]; } RSC_HDR;
 typedef struct { UCHAR id[8]; ULONG prio[2]; ULONG addr; USHORT len, off; } ENT_HDR;
 #pragma pack(pop)
 
-static BOOLEAN CmdDbFind(PUCHAR db, const char *name, ULONG *addr, ULONG *lvl)
+static BOOLEAN CmdDbFind(PUCHAR db, const char *name, USHORT want, ULONG *addr, ULONG *lvl)
 {
     PUCHAR data = db + 8 + 8 * sizeof(RSC_HDR) + 8;
     ULONG i, j, k;
@@ -45,7 +45,7 @@ static BOOLEAN CmdDbFind(PUCHAR db, const char *name, ULONG *addr, ULONG *lvl)
             {
                 USHORT *v = (USHORT *)(data + h->data_off + e->off);
                 ULONG n = e->len / 2, best = n ? n - 1 : 0;
-                for (k = 0; k < n; k++) if (v[k] >= 256) { best = k; break; }   /* first >= NOM */
+                for (k = 0; k < n; k++) if (v[k] >= want) { best = k; break; }
                 LOG("cmd-db: %s addr=%05X levels=%lu pick hlvl %lu (vlvl %u)", name, e->addr, n, best, n ? v[best] : 0);
                 *addr = e->addr; *lvl = best; return TRUE;
             }
@@ -54,11 +54,34 @@ static BOOLEAN CmdDbFind(PUCHAR db, const char *name, ULONG *addr, ULONG *lvl)
     LOG("cmd-db: %s not found", name); return FALSE;
 }
 
+
+static VOID RpmhWrite(PUCHAR tcs, const char *name, ULONG addr, ULONG lvl)
+{
+    ULONG id, t;
+    PUCHAR c;
+    for (id = 0; id < 2; id++) if (R(tcs + id * 0x2A0, 0x18)) break;       /* DRV_STATUS != 0 -> idle */
+    if (id == 2) { LOG("rpmh: no idle active TCS for %s", name); return; }
+    c = tcs + id * 0x2A0;
+    W(c, 0x30, 8 | (1u << 8) | (1u << 16));     /* MSGID: len 8, resp req, write */
+    W(c, 0x34, addr);
+    W(c, 0x38, lvl);
+    W(c, 0x10, 1);
+    W(c, 0x1C, 1);
+    W(c, 0x14, 0);
+    W(c, 0x14, 1u << 16);
+    W(c, 0x14, (1u << 16) | (1u << 24));
+    for (t = 0; t < 10000 && !(R(tcs, 0x04) & (1u << id)); t++) KeStallExecutionProcessor(10);
+    LOG("rpmh: tcs%lu %s=%lu irq_status=%08X cmd_status=%08X (%lu0 us)%s", id, name, lvl,
+        R(tcs, 0x04), R(c, 0x3C), t, t >= 10000 ? " TIMEOUT" : "");
+    W(tcs, 0x08, 1u << id);
+    W(c, 0x1C, 0); W(c, 0x14, 0);
+}
+
 static VOID VoteGfxRail(VOID)
 {
     PUCHAR io = NULL, rsc = Map(0x18220000ull, 0x4000), tcs;
     PUCHAR db = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, 0x20000, 'ugpP');
-    ULONG addr, lvl, t, id, dbpa = 0x80820000, dblen = 0;
+    ULONG addr, lvl, t, dbpa = 0x80820000, dblen = 0;
     {   /* AOP msg RAM dictionary (downstream "qcom,cmd-db" reg 0xC3F000C): cmd-db base, size */
         PUCHAR dict = Map(0x0C3F0000ull, 0x1000);
         if (dict) { dbpa = R(dict, 0xC); dblen = R(dict, 0x10); MmUnmapIoSpace(dict, 0x1000); }
@@ -68,27 +91,13 @@ static VOID VoteGfxRail(VOID)
     io = Map(dbpa, 0x20000);
     if (!io || !rsc || !db) { LOG("rpmh: map/alloc failed io=%p rsc=%p", io, rsc); goto out; }
     /* copy with aligned 32-bit reads: device mappings fault on the unaligned accesses parsing needs */
-    for (t = 0; t < 0x20000; t += 4) *(ULONG *)(db + t) = R(io, t);
-    if (!CmdDbFind(db, "gfx.lvl", &addr, &lvl)) goto out;
+    if (!dblen || dblen > 0x20000) dblen = 0x20000;
+    RtlZeroMemory(db, 0x20000);
+    for (t = 0; t < dblen; t += 4) *(ULONG *)(db + t) = R(io, t);
     tcs = rsc + 0xD00;
-    for (id = 0; id < 2; id++) if (R(tcs + id * 0x2A0, 0x18)) break;       /* DRV_STATUS != 0 -> idle */
-    if (id == 2) { LOG("rpmh: no idle active TCS"); goto out; }
-    {
-        PUCHAR c = tcs + id * 0x2A0;
-        W(c, 0x30, 8 | (1u << 8) | (1u << 16));     /* MSGID: len 8, resp req, write */
-        W(c, 0x34, addr);
-        W(c, 0x38, lvl);
-        W(c, 0x10, 1);                              /* wait for completion on cmd0 */
-        W(c, 0x1C, 1);                              /* enable cmd0 */
-        W(c, 0x14, 0);
-        W(c, 0x14, 1u << 16);                       /* AMC mode */
-        W(c, 0x14, (1u << 16) | (1u << 24));        /* trigger */
-        for (t = 0; t < 10000 && !(R(tcs, 0x04) & (1u << id)); t++) KeStallExecutionProcessor(10);
-        LOG("rpmh: tcs%lu gfx.lvl=%lu irq_status=%08X cmd_status=%08X (%lu0 us)%s", id, lvl,
-            R(tcs, 0x04), R(c, 0x3C), t, t >= 10000 ? " TIMEOUT" : "");
-        W(tcs, 0x08, 1u << id);                     /* clear irq */
-        W(c, 0x1C, 0); W(c, 0x14, 0);
-    }
+    /* MX must be >= GFX: raise MX to NOM first (ARC aggregates max, so this only raises), then GFX to SVS */
+    if (CmdDbFind(db, "mx.lvl", 256, &addr, &lvl)) RpmhWrite(tcs, "mx.lvl", addr, lvl);
+    if (CmdDbFind(db, "gfx.lvl", 128, &addr, &lvl)) RpmhWrite(tcs, "gfx.lvl", addr, lvl);
 out:
     if (io) MmUnmapIoSpace(io, 0x20000);
     if (db) ExFreePoolWithTag(db, 'ugpP');
@@ -123,14 +132,17 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
     /* GX GDSC (GPU_CC_GX_GDSCR 0x100C, CFG 0x1010, clamp 0x1508 - gpucc-sm8250.c gpu_gx_gdsc).
        Never touches GPU core registers itself. */
     v = R(gpucc, 0x100C);
+    W(gpucc, 0x1508, R(gpucc, 0x1508) & ~1u);               /* deassert GMEM clamp (CLAMP_IO) */
+    W(gpucc, 0x1508, R(gpucc, 0x1508) | 0x10u); KeStallExecutionProcessor(1);   /* AON_RESET: GMEM reset pulse */
+    W(gpucc, 0x1508, R(gpucc, 0x1508) & ~0x10u);
     W(gpucc, 0x100C, v & ~1u);
     for (t = 0; t < 1000 && !(R(gpucc, 0x100C) & 0x80000000u) && !(R(gpucc, 0x1010) & 0x10000u); t++)
         KeStallExecutionProcessor(10);
     if ((R(gpucc, 0x100C) & 0x80000000u) || (R(gpucc, 0x1010) & 0x10000u)) {
-        W(gpucc, 0x1508, R(gpucc, 0x1508) & ~1u);           /* release GX IO clamp */
         LOG("GX ON: gdscr %08X -> %08X cfg %08X clamp %08X (%lu0 us)", v, R(gpucc, 0x100C), R(gpucc, 0x1010), R(gpucc, 0x1508), t);
     } else {
-        W(gpucc, 0x100C, v);                                 /* give up: restore collapse */
+        W(gpucc, 0x100C, v);                                 /* give up: restore collapse + clamp */
+        W(gpucc, 0x1508, R(gpucc, 0x1508) | 1u);
         LOG("GX did not power up: gdscr %08X cfg %08X (%lu0 us) - restored", R(gpucc, 0x100C), R(gpucc, 0x1010), t);
     }
     MmUnmapIoSpace(gcc71, 0x1000); MmUnmapIoSpace(gcc52, 0x1000); MmUnmapIoSpace(gpucc, 0x9000); MmUnmapIoSpace(smmu, 0x1000);
