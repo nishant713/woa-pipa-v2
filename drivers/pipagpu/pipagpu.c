@@ -142,6 +142,11 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
     /* 0x3DA6000 (GPU SMMU "implementation defined 1" page) is NOT readable from HLOS: a read hangs the CPU */
     LOG("GPU CX on: gdscr %08X -> %08X hw_ctrl %08X (%lu0 us); gpu smmu sCR0=%08X IDR0=%08X",
         v, R(gpucc, 0x106C), R(gpucc, 0x1540), t, R(smmu, 0), R(smmu, 0x20));
+    {   /* qcdx rejects the display controller version it reads (table entry 0x3a): log what the
+           hardware reports. MDSS is running (UEFI framebuffer), so these reads are safe. */
+        PUCHAR mdss = Map(0x0AE00000ull, 0x2000);
+        if (mdss) { LOG("mdss: HW_VERSION=%08X  mdp HW_VERSION=%08X", R(mdss, 0x0), R(mdss, 0x1000)); MmUnmapIoSpace(mdss, 0x2000); }
+    }
     VoteGfxRail();
     /* GX GDSC (GPU_CC_GX_GDSCR 0x100C, CFG 0x1010, clamp 0x1508 - gpucc-sm8250.c gpu_gx_gdsc).
        Never touches GPU core registers itself. */
