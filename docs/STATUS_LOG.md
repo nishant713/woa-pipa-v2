@@ -1,3 +1,19 @@
+## 2026-11-25 21:45: GPU — Adreno driver reaches display init; next blocker is PIL (firmware loader) needing VBS trustlets
+
+Local-only binary patches (kona_bsp, re-signed with the pipa test cert by `claude\sign_qcdx.ps1`, launcher `11.RUN_QPEP_CYCLE_GPU_NOSCM.bat`), qcdxkm8250.sys (orig kept as `.orig`):
+- `+0x29ac40` `mov w19,#0; b +0x29ad3c` — skip the 30 s wait for SCM interface {41c66d2a} (SCM waits for VBS trustlets).
+- `+0x29aeb0` `mov w19,#0; b +0x29b0c0` — skip waits for trustlet interfaces {ae865c08},{16a1ab50},{eb3c7242}.
+- `+0xacb88` `mov w19,#1` -> `#2` — display-version table: for MDSS 6.x only column 2 is supported (0x34); column 1 = 0x3a (reject). MDSS/MDP HW_VERSION read 0x60000000 (pipagpu now logs it).
+Result: Windows reaches the desktop, then adapter start fails and screen blanks. qcdx event ring (qcdxkm8250+0x1c6b80, `kd_b.txt`) shows the failure at `+0x29c6d8`: interface query `+0x2b5d14` for GUID {e2eb84c1-4068-4994-a48f-f3ac0d38dc29} = **PIL (qcpil8250)** returns C00000C0, fallback "PILRegistration".
+
+PIL (ACPI\QCOM251B) is Started (no longer Code 31) but never publishes {e2eb84c1}: it only does so from a work item queued when context flags +0x504 and +0x508 are set, which happens only in its arrival callbacks for the trustlet interfaces ({ae865c08} etc.), and the follow-up step (+0x290a0) talks to the trustlet (secure PIL). No VBS on pipa -> blocked.
+
+**Decision (2026-11-25): write our own PIL replacement** providing the interface qcdx needs and loading the GPU zap shader / GMU firmware via direct SCM PAS SMC calls (as Linux does on pipa). First step next session: map exactly how qcdx obtains and calls the PIL interface (what [ctx+0x148]/[ctx+0x150]/[ctx+0x270] are at `+0x2b5cf0..+0x2b5dd0`, interface size/version, functions called).
+
+**0x7B INACCESSIBLE_BOOT_DEVICE (intermittent):** qcpep (our PEP) not loaded at all (`lm m qcpep*` empty) -> 93 devnodes incl. UFS wait on dependency. Correlates with firmware state `irq_en=1` (vs 7) in pipagpu's RSC log. A reinstall cycle / retry clears it. Root cause open (`kd_pep.txt` ready). After crashes also `RUN_FIX_BOOTSTATUS.bat` may be needed.
+
+---
+
 ## 2026-11-24 22:50: Wi-Fi data path WORKS (PCI0._CCA = 0)
 
 Tip from another pipa porter: the PCIe0 root (Wi-Fi QCA6390) is not DMA-coherent. DSDT `PCI0._CCA` changed from `Return (One)` to `Return (Zero)` (one AML byte + checksum) in the panel image -> `claude\Mu-pipa-pcie-release-v2-pipapanel-cca0.img` (md5 39ee624c). Wi-Fi connects and internet works. This image is now the default for `1.RUN_QPEP_CYCLE.bat` and `4.RUN_KD_BOOT_PANEL.bat`. (PCI1 `_CCA` left at 1.) The gpu2 image also has a `_CCA=0` variant (`...-gpu2-cca0.img`).
