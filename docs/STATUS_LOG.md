@@ -14,6 +14,18 @@ PIL (ACPI\QCOM251B) is Started (no longer Code 31) but never publishes {e2eb84c1
 
 ---
 
+## 2026-11-26 00:25: GPU start gets past PIL and SMMU; real hang (0x101) during adapter start
+
+- Patched (locally) the GPU SMMU driver so it no longer writes to the page we disabled (value 0xFF in the INF). That page was being treated as a real page number, which caused a 0xBE crash. Result: a clean Code 43 instead of a crash.
+- Patched (locally) qcdx to skip the PIL lookup. It belongs to the video engine. The GPU driver now gets further:
+  - "not found" (C0000225)
+  - control code `0x88882098` sent to interface {55beca03} is rejected (C0000010)
+  - more C0000010 results
+- pipagpu now configures the GMU clock (200 MHz, `cx_gmu_clk` running). This did not change the outcome.
+- The GPU0 ACPI `_CRS` used SM8180 addresses (0x2C00000/0x2C60000/0x2C90000). A local test image moves them to SM8250 0x3D00000/0x3D60000/0x3D90000. Still hangs.
+- A core freezes inside `DpiFdoStartAdapterThread`. It reproduces with no debugger attached (BSOD CLOCK_WATCHDOG_TIMEOUT), so it is a real hardware-access hang.
+- Next: pinpoint the hanging register access (qcdx `+0x2b4be0` → `+0x2bc680`), check which ranges qcdx maps, find the owner of IOCTL 0x88882098, then zap-shader loading via SCM PAS.
+
 ## 2026-11-24 22:50: Wi-Fi data path WORKS (PCI0._CCA = 0)
 
 Tip from another pipa porter: the PCIe0 root (Wi-Fi QCA6390) is not DMA-coherent. DSDT `PCI0._CCA` changed from `Return (One)` to `Return (Zero)` (one AML byte + checksum) in the panel image -> `claude\Mu-pipa-pcie-release-v2-pipapanel-cca0.img` (md5 39ee624c). Wi-Fi connects and internet works. This image is now the default for `1.RUN_QPEP_CYCLE.bat` and `4.RUN_KD_BOOT_PANEL.bat`. (PCI1 `_CCA` left at 1.) The gpu2 image also has a `_CCA=0` variant (`...-gpu2-cca0.img`).
