@@ -139,6 +139,18 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
     Set(gpucc, 0x1004, 1);                         /* gpu_cc_cxo_aon_clk */
     LOG("CX branches: crc_ahb=%08X cx_apb=%08X cx_snoc_dvm=%08X cxo_aon=%08X",
         R(gpucc, 0x107C), R(gpucc, 0x1088), R(gpucc, 0x108C), R(gpucc, 0x1004));
+    {   /* GMU clock (gpucc-sm8250.c): gpu_cc_gmu_clk_src RCG @0x1120 = 200 MHz from GPLL0_OUT_MAIN_DIV
+           (src sel 6, div 1.5 -> field 2), then gpu_cc_cx_gmu_clk @0x1098. qcdx's adapter start hangs a CPU
+           on a register access after the SMMU step; an unclocked GMU is the prime suspect. */
+        ULONG c0 = R(gpucc, 0x1120), f0 = R(gpucc, 0x1124), b0 = R(gpucc, 0x1098);
+        W(gpucc, 0x1124, (f0 & ~0x71Fu) | (6u << 8) | 2u);
+        W(gpucc, 0x1120, R(gpucc, 0x1120) | 1u);                         /* CMD_RCGR UPDATE */
+        for (t = 0; t < 500 && (R(gpucc, 0x1120) & 1u); t++) KeStallExecutionProcessor(1);
+        Set(gpucc, 0x1098, 1);                                            /* gpu_cc_cx_gmu_clk */
+        for (t = 0; t < 500 && (R(gpucc, 0x1098) & 0x80000000u); t++) KeStallExecutionProcessor(1);
+        LOG("gmu clk: rcg cmd %08X->%08X cfg %08X->%08X  cx_gmu %08X->%08X (%lu us)",
+            c0, R(gpucc, 0x1120), f0, R(gpucc, 0x1124), b0, R(gpucc, 0x1098), t);
+    }
     /* 0x3DA6000 (GPU SMMU "implementation defined 1" page) is NOT readable from HLOS: a read hangs the CPU */
     LOG("GPU CX on: gdscr %08X -> %08X hw_ctrl %08X (%lu0 us); gpu smmu sCR0=%08X IDR0=%08X",
         v, R(gpucc, 0x106C), R(gpucc, 0x1540), t, R(smmu, 0), R(smmu, 0x20));
