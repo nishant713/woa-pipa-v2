@@ -176,6 +176,17 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
         W(gpucc, 0x1508, R(gpucc, 0x1508) | 1u);
         LOG("GX did not power up: gdscr %08X cfg %08X (%lu0 us) - restored", R(gpucc, 0x100C), R(gpucc, 0x1010), t);
     }
+    {   /* Probe ladder (2026-11-26): qcdx's adapter start freezes a core on a register access. Read one register in
+           each GPU block, safest first, logging BEFORE each read, so the last line in the KD log names the block
+           that does not answer. If boot freezes after a "probe ..." line, delete claude\gpu_power_on.txt. */
+        PUCHAR gmu, gpu;
+        LOG("probe: gx_gmu_clk[1064]=%08X cx_gmu_clk[1098]=%08X gx_gdscr=%08X", R(gpucc, 0x1064), R(gpucc, 0x1098), R(gpucc, 0x100C));
+        gmu = Map(0x03D6A000ull, 0x1000);
+        if (gmu) { LOG("probe: GMU 0x3D6A000 read..."); LOG("probe: GMU +0=%08X +4=%08X", R(gmu, 0), R(gmu, 4)); MmUnmapIoSpace(gmu, 0x1000); }
+        gpu = Map(0x03D00000ull, 0x1000);
+        if (gpu) { LOG("probe: GPU core 0x3D00000 read..."); LOG("probe: GPU +0=%08X +4=%08X", R(gpu, 0), R(gpu, 4)); MmUnmapIoSpace(gpu, 0x1000); }
+        LOG("probe: done");
+    }
     MmUnmapIoSpace(gcc71, 0x1000); MmUnmapIoSpace(gcc52, 0x1000); MmUnmapIoSpace(gpucc, 0x9000); MmUnmapIoSpace(smmu, 0x1000);
     return STATUS_SUCCESS;
 }
