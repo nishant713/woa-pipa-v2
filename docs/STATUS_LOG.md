@@ -14,6 +14,29 @@ PIL (ACPI\QCOM251B) is Started (no longer Code 31) but never publishes {e2eb84c1
 
 ---
 
+## 2026-11-26 23:30: GPU core freeze FIXED (wrong RSCC address); now stuck at the GPU RSC handshake
+
+All qcdx/qcsmmu patches below are local only (proprietary binaries). The repo has pipagpu/PEP changes only.
+
+- Bisected the freeze to qcdx's GMU boot `+0x2bc680` → `+0x2bc1f8` (RSCC/PDC init).
+  - qcdx is an 8cx build (internal name qcdxkm8180). With no `GPU_RSCC` resource, it falls back to RSCC = GMU region + 0x2D000. That is the A640 layout.
+  - On SM8250 (A650) the RSCC is at **0x3DE0000**. Writing to the A640 address froze a core.
+- Fix (gpu5 image + qcdx patch):
+  - The GPU0 `_CRS` `GPU_RPMH_CPRF` resource (0x0C200000) now points at 0x3DE0000.
+  - qcdx matches it as `GPU_RSCC`: strings swapped, and `GPU_RPMH_CPRF` renamed to `GPU_RPMH_CPRX`.
+  - Result: no more freeze. The GPU fails cleanly (sometimes with a cleanup crash at `+0x2c8180`).
+- Also done:
+  - PEP 8250 ignores GPU0 FOOTSWITCH/CLOCK descriptors (1976380).
+  - pipagpu enables GMU clocks: gmu_clk_src, cx_gmu, gx_gmu, ddrss_gpu_axi.
+  - Model forced to 0x71 (A650 path; the driver detected 0x57).
+  - PDC enable written as 0x80000001 (Linux value).
+  - pipagpu sets FAL_INTF/FALNEXT_INTF (240cac2, untested).
+- **Current blocker:** `+0x22378` writes GMU_RSCC_CONTROL_REQ=2 (0x3D8EC1C). ACK (0x3D8EC20) never reaches bit 1; it reads 1.
+  - RSCC readback: SEQ_START/MATCH regs are correct.
+  - The hidden-TCS registers (+0x34..+0x44) do not hold the zeros written. Either the A650 layout differs, or they are secure.
+  - The GMU CM3 is still in reset (expected).
+  - Next: compare qcdx's RSCC sequence with Linux a6xx_gmu_rpmh_init for the a650 family. Check GMU_GENERAL_7 (TCM retention). Question whether our forced GX-on/GFX vote conflicts with the GPU RSC.
+
 ## 2026-11-26 00:25: GPU start gets past PIL and SMMU; real hang (0x101) during adapter start
 
 - Patched (locally) the GPU SMMU driver so it no longer writes to the page we disabled (value 0xFF in the INF). That page was being treated as a real page number, which caused a 0xBE crash. Result: a clean Code 43 instead of a crash.
