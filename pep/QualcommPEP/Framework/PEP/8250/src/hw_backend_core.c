@@ -506,6 +506,11 @@ static int readback_action(win_backend_t* b, const power_action_t* a, uint64_t* 
 
 static int apply_action(win_backend_t* b, const char* path, const power_action_t* a)
 {
+    /* pipa 2026-11-26: the GPU0 F-state descriptors (Kona DSDT) switch mdss_core_gdsc / GPU clocks off while
+       qcdx is still touching the hardware during adapter start -> black screen and a core stuck on a bus access.
+       Leave everything that UEFI and pipagpu turned on alone: report GPU0 FOOTSWITCH/CLOCK actions as done. */
+    if (path && strstr(path, "GPU0") && (a->kind == POWER_FOOTSWITCH || a->kind == POWER_CLOCK))
+        return 1;
     switch (a->kind) {
         case POWER_FOOTSWITCH:
             return b->io.domain_apply && b->io.domain_apply(b->io.ctx, path, a);
