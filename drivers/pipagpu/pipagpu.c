@@ -180,6 +180,10 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
            each GPU block, safest first, logging BEFORE each read, so the last line in the KD log names the block
            that does not answer. If boot freezes after a "probe ..." line, delete claude\gpu_power_on.txt. */
         PUCHAR gmu, gpu;
+        Set(gcc71, 0x154, 1);                         /* gcc_ddrss_gpu_axi_clk (Linux a650 GMU "axi" clock) */
+        Set(gpucc, 0x1064, 1);                        /* gpu_cc_gx_gmu_clk (GX domain, needs GX GDSC on) */
+        for (t = 0; t < 500 && (R(gpucc, 0x1064) & 0x80000000u); t++) KeStallExecutionProcessor(1);
+        LOG("probe: ddrss_gpu_axi[71154]=%08X (%lu us)", R(gcc71, 0x154), t);
         LOG("probe: gx_gmu_clk[1064]=%08X cx_gmu_clk[1098]=%08X gx_gdscr=%08X", R(gpucc, 0x1064), R(gpucc, 0x1098), R(gpucc, 0x100C));
         gmu = Map(0x03D6A000ull, 0x1000);
         if (gmu) { LOG("probe: GMU 0x3D6A000 read..."); LOG("probe: GMU +0=%08X +4=%08X", R(gmu, 0), R(gmu, 4)); MmUnmapIoSpace(gmu, 0x1000); }
