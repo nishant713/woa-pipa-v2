@@ -189,6 +189,11 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
         if (gmu) { LOG("probe: GMU 0x3D6A000 read..."); LOG("probe: GMU +0=%08X +4=%08X", R(gmu, 0), R(gmu, 4)); MmUnmapIoSpace(gmu, 0x1000); }
         gpu = Map(0x03D00000ull, 0x1000);
         if (gpu) { LOG("probe: GPU core 0x3D00000 read..."); LOG("probe: GPU +0=%08X +4=%08X", R(gpu, 0), R(gpu, 4)); MmUnmapIoSpace(gpu, 0x1000); }
+        {   /* a650 FAL10 vote veto (Linux a6xx_gmu_fw_start writes 1 to both GPU_GMU_CX_GMU_CX_FAL_INTF and
+               ..._FALNEXT_INTF for the a650 family). qcdx (8cx build) writes only one of them. */
+            PUCHAR fal = Map(0x03D7E000ull, 0x1000);
+            if (fal) { W(fal, 0x3C0, 1); W(fal, 0x3C4, 1); LOG("probe: FAL_INTF=%08X FALNEXT_INTF=%08X", R(fal, 0x3C0), R(fal, 0x3C4)); MmUnmapIoSpace(fal, 0x1000); }
+        }
         LOG("probe: done");
     }
     MmUnmapIoSpace(gcc71, 0x1000); MmUnmapIoSpace(gcc52, 0x1000); MmUnmapIoSpace(gpucc, 0x9000); MmUnmapIoSpace(smmu, 0x1000);
