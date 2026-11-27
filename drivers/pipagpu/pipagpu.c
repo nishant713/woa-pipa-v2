@@ -194,6 +194,21 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
             PUCHAR fal = Map(0x03D7E000ull, 0x1000);
             if (fal) { W(fal, 0x3C0, 1); W(fal, 0x3C4, 1); LOG("probe: FAL_INTF=%08X FALNEXT_INTF=%08X", R(fal, 0x3C0), R(fal, 0x3C4)); MmUnmapIoSpace(fal, 0x1000); }
         }
+        {   /* GMU_GENERAL_7 (0x1f9cc -> 0x3D7E730) = 1: TCM retention, written by Linux a6xx_gmu_fw_start for
+               a6xx (non-a7xx) before a6xx_rpmh_start. qcdx's model-0x71 path writes the a7xx CX_MISC variant instead. */
+            PUCHAR g = Map(0x03D7E000ull, 0x1000);
+            if (g) { W(g, 0x730, 1); LOG("probe: GMU_GENERAL_7=%08X", R(g, 0x730)); MmUnmapIoSpace(g, 0x1000); }
+        }
+        {   /* Is the GPU PDC programmed by AOP (a650 'pdc_in_aop')? Dump non-zero words of the PDC TCS area. */
+            PUCHAR pdc = Map(0x0B295000ull, 0x1000); ULONG k, n = 0;
+            if (pdc) {
+                for (k = 0x500; k < 0x900 && n < 24; k += 4) { ULONG v = R(pdc, k); if (v) { LOG("probe: PDC[+%04X]=%08X", 0x5000 + k, v); n++; } }
+                LOG("probe: PDC TCS area non-zero words shown: %lu (ENABLE[+4500] see below)", n);
+                MmUnmapIoSpace(pdc, 0x1000);
+            }
+            pdc = Map(0x0B294000ull, 0x1000);
+            if (pdc) { LOG("probe: PDC ENABLE[+4500]=%08X SEQ_START[+4520]=%08X", R(pdc, 0x500), R(pdc, 0x520)); MmUnmapIoSpace(pdc, 0x1000); }
+        }
         LOG("probe: done");
     }
     MmUnmapIoSpace(gcc71, 0x1000); MmUnmapIoSpace(gcc52, 0x1000); MmUnmapIoSpace(gpucc, 0x9000); MmUnmapIoSpace(smmu, 0x1000);
