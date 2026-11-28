@@ -96,8 +96,11 @@ typedef struct _DEV_CTX {
     BOOLEAN sentUp;
     UCHAR lastCid[10];
     ULONG hbPolls, hbReads, hbFail, hbReports, hbDropped, hbTouch;
+    ULONG deadPolls, recoveries;      /* touch drop-out recovery (2026-11-28) */
+    LONGLONG lastRecover;
 } DEV_CTX, *PDEV_CTX;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEV_CTX, GetCtx)
+static VOID BringUp(PDEV_CTX c);
 
 DRIVER_INITIALIZE DriverEntry;
 EVT_WDF_DRIVER_DEVICE_ADD NtDeviceAdd;
@@ -522,6 +525,30 @@ VOID NtPoll(WDFTIMER t)
     rs = NvtRead(c, EVENT_BUF_ADDR, d, POINT_DATA_LEN + PEN_DATA_LEN);
     if (!NT_SUCCESS(rs)) { c->hbFail++; if (++rdfail <= 5) LOG("poll: read failed %08X", rs); goto rearm; }
     c->hbReads++;
+    {   /* Drop-out recovery: the NT36532 is flash-less. If it resets (ESD, rail glitch) it loses its firmware and
+           the event buffer reads the 0x77 ESD/reset pattern. After ~1 s of that, re-download the
+           firmware (at most once every 10 s). */
+        ULONG k, ff = 0, e77 = 1; LARGE_INTEGER now;   /* all-0xFF is NOT a failure: it is the normal idle
+                                                         buffer once a finger has been seen (touches keep coming) */
+        for (k = 0; k < 8; k++) { if (d[k] != 0x77) e77 = 0; }
+        if (e77) c->deadPolls++; else c->deadPolls = 0;
+        KeQuerySystemTimePrecise(&now);
+        if (c->deadPolls >= 50 && now.QuadPart - c->lastRecover > 100000000LL) {
+            c->lastRecover = now.QuadPart; c->recoveries++;
+            LOG("recover #%lu: controller not answering (%s for %lu polls) - re-downloading firmware",
+                c->recoveries, ff ? "all FF" : "0x77", c->deadPolls);
+            if (c->lastFingers) {      /* release any finger the OS still thinks is down */
+                RtlZeroMemory(&rep, sizeof(rep)); rep.rid = RID_TOUCH;
+                for (k = 0; k < c->lastFingers && k < MAX_CONTACTS; k++) rep.c[k].cid = c->lastCid[k];
+                rep.count = (UCHAR)c->lastFingers; c->scan = (USHORT)(c->scan + 200); rep.scan = c->scan;
+                SendReport(c, &rep); c->lastFingers = 0;
+            }
+            BringUp(c);
+            LOG("recover #%lu: %s", c->recoveries, c->fwOk ? "firmware reloaded, polling resumes" : "FAILED (will retry)");
+            if (!c->fwOk) { c->fwOk = TRUE; c->deadPolls = 0; }   /* keep polling so a later retry can happen */
+            goto rearm;
+        }
+    }
     {   /* heartbeat every ~10 s: shows whether polling, the SPI reads, the controller and the HID reader are alive */
         static LARGE_INTEGER last; LARGE_INTEGER now; KeQuerySystemTimePrecise(&now);
         if (now.QuadPart - last.QuadPart > 100000000LL) {
@@ -530,7 +557,7 @@ VOID NtPoll(WDFTIMER t)
             LOG("hb: polls=%lu reads=%lu fail=%lu touches=%lu reports=%lu dropped(no HID read)=%lu raw=%02X %02X %02X %02X %02X %02X %02X %02X%s%s%s",
                 c->hbPolls, c->hbReads, c->hbFail, c->hbTouch, c->hbReports, c->hbDropped,
                 d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
-                same77 ? " [ESD/reset pattern 0x77]" : "", sameFF ? " [all FF: controller gone?]" : "", zero ? " [zeros]" : "");
+                same77 ? " [ESD/reset pattern 0x77]" : "", sameFF ? " [all FF: idle]" : "", zero ? " [zeros]" : "");
             last = now;
             c->hbPolls = c->hbReads = c->hbFail = c->hbTouch = c->hbReports = c->hbDropped = 0;
         }
@@ -646,19 +673,19 @@ NTSTATUS NtD0Exit(WDFDEVICE dev, WDF_POWER_DEVICE_STATE target)
     return STATUS_SUCCESS;
 }
 
-NTSTATUS NtD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
+/* Full controller bring-up: GENI init, chip id, firmware download, reset state, FW info.
+   Used at D0 entry and by the drop-out recovery in NtPoll. Returns with c->fwOk set on success. */
+static VOID BringUp(PDEV_CTX c)
 {
-    PDEV_CTX c = GetCtx(dev);
     static const PCWSTR files[] = { L"\\SystemRoot\\System32\\drivers\\nt36532_csot.bin", L"\\SystemRoot\\System32\\drivers\\nt36532_tianma.bin" };
     UCHAR b[40]; ULONG i; NTSTATUS st;
-    LOG("D0 entry (from D%d)", (int)prev - 1);
-    if (!c->se) return STATUS_SUCCESS;
-    if (!NT_SUCCESS(GeniInit(c))) return STATUS_SUCCESS;   /* never fail start during bring-up */
+    c->fwOk = FALSE;
+    if (!NT_SUCCESS(GeniInit(c))) return;
     c->inited = TRUE;
     RtlZeroMemory(b, sizeof(b));
     st = NvtRead(c, 0x1FB104, b, 7);
     LOG("chip id @1FB104 st=%08X: %02X %02X %02X %02X %02X %02X %02X", st, b[0], b[1], b[2], b[3], b[4], b[5], b[6]);
-    if (b[3] != 0x32 || b[4] != 0x65 || b[5] != 0x03) { LOG("not an NT36532 - stop"); return STATUS_SUCCESS; }
+    if (b[3] != 0x32 || b[4] != 0x65 || b[5] != 0x03) { LOG("not an NT36532 - stop"); return; }
 
     for (i = 0; i < RTL_NUMBER_OF(files) && !c->fwOk; i++) {
         UCHAR *fw = NULL; ULONG len = 0;
@@ -670,7 +697,7 @@ NTSTATUS NtD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
         LOG("download %ws -> %08X", files[i], st);
         if (NT_SUCCESS(st)) c->fwOk = TRUE;
     }
-    if (!c->fwOk) return STATUS_SUCCESS;
+    if (!c->fwOk) return;
 
     CheckResetState(c, RESET_STATE_REK, 50);
     RtlZeroMemory(b, sizeof(b));
@@ -678,7 +705,16 @@ NTSTATUS NtD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
     c->absX = (USHORT)((b[4] << 8) | b[5]); c->absY = (USHORT)((b[6] << 8) | b[7]);
     LOG("fw info: ver=%02X ~ver=%02X x_num=%u y_num=%u abs_x=%u abs_y=%u buttons=%u cascade=%u",
         b[0], b[1], b[2], b[3], c->absX, c->absY, b[10], b[33] & 1);
-    c->lastFingers = 0; c->logBudget = 0;
+    c->lastFingers = 0; c->logBudget = 0; c->deadPolls = 0;
+}
+
+NTSTATUS NtD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
+{
+    PDEV_CTX c = GetCtx(dev);
+    LOG("D0 entry (from D%d)", (int)prev - 1);
+    if (!c->se) return STATUS_SUCCESS;
+    BringUp(c);                        /* never fail start during bring-up */
+    if (!c->fwOk) return STATUS_SUCCESS;
     c->polling = TRUE;
     if (c->poll) WdfTimerStart(c->poll, WDF_REL_TIMEOUT_IN_MS(200));
     LOG("polling started - touch the screen (hb build)");
