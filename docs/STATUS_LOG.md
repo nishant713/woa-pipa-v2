@@ -14,6 +14,15 @@ PIL (ACPI\QCOM251B) is Started (no longer Code 31) but never publishes {e2eb84c1
 
 ---
 
+## 2026-11-28 18:30: Touch drop-out FIXED
+
+- Cause: the touch driver only sent tip=0 when *all* fingers lifted. A contact that vanished while another stayed down, or was dropped as junk, stayed "down" in Windows forever. Ghost contacts piled up and Windows stopped taking touch until reboot; mouse and keyboard were unaffected.
+- Fix (44f8df6): per-contact state, deduped IDs, tip=0 at the last position for every vanished contact. The heartbeat shows `lifts=`.
+- Also (389f331): firmware re-download on the 0x77 ESD/reset pattern. All-0xFF in the event buffer is the normal idle state, not "controller gone".
+- Verified: a ~3.5 h session (1276 heartbeats), touch alive, lifts reported. No recoveries were needed.
+- PC is in daily mode: Graphics\DXKM commented out in qpep_extra_drivers.txt, gpu_power_on.txt → .off.
+- 0x7B also hit with pipagpu off, so the irq_en correlation was coincidental.
+
 ## 2026-11-28 10:15: GPU parked; findings summary
 
 Where the GPU stands (all qcdx/qcsmmu patches are local only; see claude\ on the PC):
