@@ -81,6 +81,9 @@ static NTSTATUS create_ioctl_queue(_In_ WDFDEVICE dev, _Out_ WDFQUEUE* queue_out
 
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&qcfg, WdfIoQueueDispatchParallel);
     qcfg.EvtIoDeviceControl = evt_io_dev_control;
+    /* qcdx sends its PEP vendor IOCTLs (0x8888xxxx) as IRP_MJ_INTERNAL_DEVICE_CONTROL: route them to the same
+       handler, or WDF fails them with STATUS_INVALID_DEVICE_REQUEST (seen 2026-11-28). */
+    qcfg.EvtIoInternalDeviceControl = evt_io_dev_control;
     qcfg.EvtIoStop = evt_io_stop;
 
     status = WdfIoQueueCreate(dev, &qcfg, WDF_NO_OBJECT_ATTRIBUTES, &queue);
