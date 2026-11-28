@@ -14,6 +14,21 @@ PIL (ACPI\QCOM251B) is Started (no longer Code 31) but never publishes {e2eb84c1
 
 ---
 
+## 2026-11-28 10:15: GPU parked; findings summary
+
+Where the GPU stands (all qcdx/qcsmmu patches are local only; see claude\ on the PC):
+1. Power/clocks via pipagpu. Since c8e7b59, GX is left collapsed and there is no MX/GFX apps-RSC vote, as Linux does before the GMU boots. Everything up to the GMU handshake works the same either way.
+2. SMMU: OFFI page 6 = 0xFF, and qcsmmu skips page-0xFF writes.
+3. PIL/SCM/trustlet waits are bypassed in qcdx.
+4. ACPI GPU0 `_CRS` used SM8180 addresses; now 0x3D00000/0x3D60000/0x3D90000. The RSCC was at the A640 offset (GMU+0x2D000); on A650 it is at 0x3DE0000. Provided via the repurposed `GPU_RPMH_CPRF` resource, renamed `GPU_RSCC` in qcdx. This removed the 0x101 core freeze.
+5. qcdx model forced to 0x71 (A650 path), PDC enable 0x80000001, GMU_GENERAL_7=1, FAL_INTF=1. FALNEXT_INTF does not stick.
+6. **Blocker:** GMU_RSCC_CONTROL_REQ=2 never gets ACK bit 1.
+   - RSCC regs match Linux a6xx_gmu_rpmh_init.
+   - RSCC SEQ_BUSY (0x3DE0404) = 1, so the sequencer is stuck.
+   - The PDC TCS area (0xB295518+) is access-protected (external abort / WHEA 0x124), i.e. AOP-owned (pdc_in_aop).
+   - Suspects: the GPUCC VOTED branches (cxo_aon, cx_apb, crc_ahb, cx_snoc_dvm) never hold their enable bit from HLOS, so the RSC may be unclocked. Possibly a missing AOP/QMP handshake that downstream kgsl (kona) performs.
+7. After that: GMU fw boot, then the zap shader via secure world (no VBS/trustlets on pipa → own SCM PAS loader).
+
 ## 2026-11-26 23:30: GPU core freeze FIXED (wrong RSCC address); now stuck at the GPU RSC handshake
 
 All qcdx/qcsmmu patches below are local only (proprietary binaries). The repo has pipagpu/PEP changes only.
