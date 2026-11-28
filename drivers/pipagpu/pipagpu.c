@@ -9,6 +9,10 @@
  */
 #include <ntddk.h>
 
+/* 2026-11-28: 0 = leave GX GDSC collapsed and do not vote MX/GFX from the apps RSC, as Linux does before the GMU
+   boots (the GPU RSC/GMU vote and power GX themselves). The GPU RSC handshake (RSCC_CONTROL_ACK bit1) never
+   completed with GX forced on. */
+#define PIPAGPU_GX_ON 0
 #define LOG(fmt, ...) DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL, "pipagpu: " fmt "\n", __VA_ARGS__)
 
 static PUCHAR Map(ULONGLONG pa, SIZE_T len)
@@ -159,6 +163,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
         PUCHAR mdss = Map(0x0AE00000ull, 0x2000);
         if (mdss) { LOG("mdss: HW_VERSION=%08X  mdp HW_VERSION=%08X", R(mdss, 0x0), R(mdss, 0x1000)); MmUnmapIoSpace(mdss, 0x2000); }
     }
+#if PIPAGPU_GX_ON
     VoteGfxRail();
     /* GX GDSC (GPU_CC_GX_GDSCR 0x100C, CFG 0x1010, clamp 0x1508 - gpucc-sm8250.c gpu_gx_gdsc).
        Never touches GPU core registers itself. */
@@ -176,18 +181,24 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
         W(gpucc, 0x1508, R(gpucc, 0x1508) | 1u);
         LOG("GX did not power up: gdscr %08X cfg %08X (%lu0 us) - restored", R(gpucc, 0x100C), R(gpucc, 0x1010), t);
     }
+#else
+    (VOID)VoteGfxRail;   /* kept for PIPAGPU_GX_ON=1 */
+    LOG("GX left collapsed, no MX/GFX vote (PIPAGPU_GX_ON=0): gx_gdscr=%08X", R(gpucc, 0x100C));
+#endif
     {   /* Probe ladder (2026-11-26): qcdx's adapter start freezes a core on a register access. Read one register in
            each GPU block, safest first, logging BEFORE each read, so the last line in the KD log names the block
            that does not answer. If boot freezes after a "probe ..." line, delete claude\gpu_power_on.txt. */
         PUCHAR gmu, gpu;
         Set(gcc71, 0x154, 1);                         /* gcc_ddrss_gpu_axi_clk (Linux a650 GMU "axi" clock) */
+#if PIPAGPU_GX_ON
         Set(gpucc, 0x1064, 1);                        /* gpu_cc_gx_gmu_clk (GX domain, needs GX GDSC on) */
+#endif
         for (t = 0; t < 500 && (R(gpucc, 0x1064) & 0x80000000u); t++) KeStallExecutionProcessor(1);
         LOG("probe: ddrss_gpu_axi[71154]=%08X (%lu us)", R(gcc71, 0x154), t);
         LOG("probe: gx_gmu_clk[1064]=%08X cx_gmu_clk[1098]=%08X gx_gdscr=%08X", R(gpucc, 0x1064), R(gpucc, 0x1098), R(gpucc, 0x100C));
         gmu = Map(0x03D6A000ull, 0x1000);
         if (gmu) { LOG("probe: GMU 0x3D6A000 read..."); LOG("probe: GMU +0=%08X +4=%08X", R(gmu, 0), R(gmu, 4)); MmUnmapIoSpace(gmu, 0x1000); }
-        gpu = Map(0x03D00000ull, 0x1000);
+        gpu = PIPAGPU_GX_ON ? Map(0x03D00000ull, 0x1000) : NULL;   /* GX off: GPU core regs would hang */
         if (gpu) { LOG("probe: GPU core 0x3D00000 read..."); LOG("probe: GPU +0=%08X +4=%08X", R(gpu, 0), R(gpu, 4)); MmUnmapIoSpace(gpu, 0x1000); }
         {   /* a650 FAL10 vote veto (Linux a6xx_gmu_fw_start writes 1 to both GPU_GMU_CX_GMU_CX_FAL_INTF and
                ..._FALNEXT_INTF for the a650 family). qcdx (8cx build) writes only one of them. */
