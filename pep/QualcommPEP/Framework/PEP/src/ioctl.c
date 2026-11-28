@@ -11226,11 +11226,21 @@ VOID evt_io_dev_control(WDFQUEUE queue, WDFREQUEST req_arg, size_t output_buf_le
             break;
         }
 
-        case IOCTL_PEP_VENDOR_88882098:
-
-            status = STATUS_NOT_SUPPORTED;
-            info = 0;
+        case IOCTL_PEP_VENDOR_88882098: {
+            /* pipa 2026-11-28: qcdx (Adreno) sends this at adapter start with input {1,1} and an 8-byte
+               output; it requires out[0] == 1 and stores byte 4 as a GPU feature flag. Answer "supported, 0". */
+            ULONG* out = NULL;
+            size_t out_sz = 0;
+            status = WdfRequestRetrieveOutputBuffer(req_arg, 8, (PVOID*)&out, &out_sz);
+            if (NT_SUCCESS(status) && out) {
+                out[0] = 1u;
+                out[1] = 0u;
+                info = 8;
+            } else {
+                info = 0;
+            }
             break;
+        }
 
         case IOCTL_PEP_VENDOR_8888209C: {
             ULONG* in = NULL;
