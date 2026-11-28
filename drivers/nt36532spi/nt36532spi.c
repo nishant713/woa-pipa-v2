@@ -95,6 +95,8 @@ typedef struct _DEV_CTX {
     USHORT scan;
     BOOLEAN sentUp;
     UCHAR lastCid[10];
+    UCHAR down[10]; USHORT lx[10], ly[10];   /* per-contact state: every contact that goes away gets a tip=0 report */
+    ULONG hbLift;
     ULONG hbPolls, hbReads, hbFail, hbReports, hbDropped, hbTouch;
     ULONG deadPolls, recoveries;      /* touch drop-out recovery (2026-11-28) */
     LONGLONG lastRecover;
@@ -537,11 +539,13 @@ VOID NtPoll(WDFTIMER t)
             c->lastRecover = now.QuadPart; c->recoveries++;
             LOG("recover #%lu: controller not answering (%s for %lu polls) - re-downloading firmware",
                 c->recoveries, ff ? "all FF" : "0x77", c->deadPolls);
-            if (c->lastFingers) {      /* release any finger the OS still thinks is down */
+            {                          /* release any finger the OS still thinks is down */
+                ULONG m = 0;
                 RtlZeroMemory(&rep, sizeof(rep)); rep.rid = RID_TOUCH;
-                for (k = 0; k < c->lastFingers && k < MAX_CONTACTS; k++) rep.c[k].cid = c->lastCid[k];
-                rep.count = (UCHAR)c->lastFingers; c->scan = (USHORT)(c->scan + 200); rep.scan = c->scan;
-                SendReport(c, &rep); c->lastFingers = 0;
+                for (k = 0; k < 10 && m < MAX_CONTACTS; k++)
+                    if (c->down[k]) { rep.c[m].cid = (UCHAR)k; rep.c[m].x = c->lx[k]; rep.c[m].y = c->ly[k]; m++; c->down[k] = 0; }
+                if (m) { rep.count = (UCHAR)m; c->scan = (USHORT)(c->scan + 200); rep.scan = c->scan; SendReport(c, &rep); }
+                c->lastFingers = 0;
             }
             BringUp(c);
             LOG("recover #%lu: %s", c->recoveries, c->fwOk ? "firmware reloaded, polling resumes" : "FAILED (will retry)");
@@ -554,36 +558,49 @@ VOID NtPoll(WDFTIMER t)
         if (now.QuadPart - last.QuadPart > 100000000LL) {
             ULONG k, same77 = 1, sameFF = 1, zero = 1;
             for (k = 1; k < 8; k++) { if (d[k] != 0x77) same77 = 0; if (d[k] != 0xFF) sameFF = 0; if (d[k]) zero = 0; }
-            LOG("hb: polls=%lu reads=%lu fail=%lu touches=%lu reports=%lu dropped(no HID read)=%lu raw=%02X %02X %02X %02X %02X %02X %02X %02X%s%s%s",
-                c->hbPolls, c->hbReads, c->hbFail, c->hbTouch, c->hbReports, c->hbDropped,
+            LOG("hb: polls=%lu reads=%lu fail=%lu touches=%lu reports=%lu lifts=%lu dropped(no HID read)=%lu raw=%02X %02X %02X %02X %02X %02X %02X %02X%s%s%s",
+                c->hbPolls, c->hbReads, c->hbFail, c->hbTouch, c->hbReports, c->hbLift, c->hbDropped,
                 d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7],
                 same77 ? " [ESD/reset pattern 0x77]" : "", sameFF ? " [all FF: idle]" : "", zero ? " [zeros]" : "");
             last = now;
-            c->hbPolls = c->hbReads = c->hbFail = c->hbTouch = c->hbReports = c->hbDropped = 0;
+            c->hbPolls = c->hbReads = c->hbFail = c->hbTouch = c->hbReports = c->hbDropped = c->hbLift = 0;
         }
     }
     RtlZeroMemory(&rep, sizeof(rep));
     rep.rid = RID_TOUCH;
-    for (i = 0; i < 10; i++) {
-        ULONG p = 6 * i, id = d[p] >> 3, stt = d[p] & 7;
-        if (id == 0 || id > 10) continue;
-        if (stt == 1 || stt == 2) {
-            ULONG x = (d[p + 1] << 8) | d[p + 2], y = (d[p + 3] << 8) | d[p + 4];
-            if (x > LX + 200 || y > LY + 200) continue;   /* junk */
-            if (x > LX) x = LX;                            /* edge contacts can read 18000/28800: clamp, don't drop */
-            if (y > LY) y = LY;
-            rep.c[n].tip = 1; rep.c[n].cid = (UCHAR)(id - 1); rep.c[n].x = (USHORT)x; rep.c[n].y = (USHORT)y;
-            n++;
+    {   /* 2026-11-28 touch drop-out fix: previously a contact that disappeared while another finger stayed down
+           (or was dropped as junk) never got a tip=0 report, so Windows kept it "down" forever. Once enough
+           ghost contacts piled up, Windows stopped taking touch input until reboot. Now: dedupe IDs, and every
+           contact that was down last time and is gone now is reported once with tip=0 at its last position. */
+        UCHAR cur[10] = { 0 }; ULONG k;
+        for (i = 0; i < 10; i++) {
+            ULONG p = 6 * i, id = d[p] >> 3, stt = d[p] & 7, cid;
+            if (id == 0 || id > 10) continue;
+            cid = id - 1;
+            if ((stt == 1 || stt == 2) && !cur[cid] && n < MAX_CONTACTS) {
+                ULONG x = (d[p + 1] << 8) | d[p + 2], y = (d[p + 3] << 8) | d[p + 4];
+                if (x > LX + 200 || y > LY + 200) continue;   /* junk (a down contact then gets lifted below) */
+                if (x > LX) x = LX;                            /* edge contacts can read 18000/28800: clamp */
+                if (y > LY) y = LY;
+                rep.c[n].tip = 1; rep.c[n].cid = (UCHAR)cid; rep.c[n].x = (USHORT)x; rep.c[n].y = (USHORT)y;
+                cur[cid] = 1; c->lx[cid] = (USHORT)x; c->ly[cid] = (USHORT)y;
+                n++;
+            }
         }
-    }
-    if (n || c->lastFingers) {         /* report while touching, plus one all-up report */
-        if (!n) {                       /* lift: send the previous contacts with tip=0 */
-            for (i = 0; i < c->lastFingers && i < MAX_CONTACTS; i++) { rep.c[i].cid = c->lastCid[i]; }
+        k = n;
+        for (i = 0; i < 10 && k < MAX_CONTACTS; i++) {
+            if (c->down[i] && !cur[i]) {
+                rep.c[k].tip = 0; rep.c[k].cid = (UCHAR)i; rep.c[k].x = c->lx[i]; rep.c[k].y = c->ly[i];
+                k++; c->hbLift++;
+            }
         }
-        c->scan = (USHORT)(c->scan + 200);   /* 20 ms in 100 us units */
-        rep.scan = c->scan;
-        rep.count = (UCHAR)(n ? n : c->lastFingers);
-        SendReport(c, &rep);
+        for (i = 0; i < 10; i++) c->down[i] = cur[i];
+        if (k) {
+            c->scan = (USHORT)(c->scan + 200);   /* 20 ms in 100 us units */
+            rep.scan = c->scan;
+            rep.count = (UCHAR)k;
+            SendReport(c, &rep);
+        }
     }
     if (n) c->hbTouch++;
     for (i = 0; i < n; i++) c->lastCid[i] = rep.c[i].cid;
@@ -706,6 +723,7 @@ static VOID BringUp(PDEV_CTX c)
     LOG("fw info: ver=%02X ~ver=%02X x_num=%u y_num=%u abs_x=%u abs_y=%u buttons=%u cascade=%u",
         b[0], b[1], b[2], b[3], c->absX, c->absY, b[10], b[33] & 1);
     c->lastFingers = 0; c->logBudget = 0; c->deadPolls = 0;
+    RtlZeroMemory(c->down, sizeof(c->down));
 }
 
 NTSTATUS NtD0Entry(WDFDEVICE dev, WDF_POWER_DEVICE_STATE prev)
